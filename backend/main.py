@@ -875,6 +875,109 @@ def _reconcile_verdict(header_value, calc, tolerance=Decimal("0.02")):
             "lines": calc["lines"], "mode": calc["mode"]}
 
 
+def _cross_check_status(instruction_hours, rostered_hours, tolerance):
+    """
+    One person-week: what the pay instruction says against what the Square
+    roster says. Same statuses and same test as payroll.v_pay_variance so the
+    grid and the view cannot disagree. Pure, so it is testable without a database.
+    """
+    if instruction_hours is None:
+        return {"status": "NO INSTRUCTION HOURS", "variance": None}
+    if rostered_hours is None:
+        return {"status": "NOT IN HOURS RUN", "variance": None}
+    variance = (Decimal(str(instruction_hours)) - Decimal(str(rostered_hours))).quantize(Decimal("0.01"))
+    return {"status": "OK" if abs(variance) <= tolerance else "VARIANCE",
+            "variance": float(variance)}
+
+
+def _cross_check(cur, record_uid, record_type, payload, spec):
+    """
+    validation.cross_check, declared by the registry (only payroll_instruction
+    declares one today). For each child line, find the Square ROSTERED hours for
+    the same employee and week and compare. Production wins where it has the
+    week, staged hours runs (pending or verified) stand in where it does not.
+    Returns None when the record has no cross_check or it does not apply.
+    """
+    rule = (spec["validation"] or {}).get("cross_check")
+    if not rule or rule.get("against_type") != "payroll_hours_line":
+        return None
+    if any(payload.get(k) != v for k, v in (rule.get("only_when") or {}).items()):
+        return None
+    week_end = payload.get("period_end")
+    if not week_end:
+        return None
+    tolerance = Decimal(str(rule.get("tolerance_hours", "0.10")))
+
+    cur.execute(
+        "SELECT record_uid, natural_key->>'employee_code' AS employee_code, "
+        "       payload->>'total_hours' AS total_hours "
+        "FROM staging.record WHERE parent_uid = %s AND row_status <> 'deleted'",
+        (record_uid,),
+    )
+    lines = [dict(r) for r in cur.fetchall()]
+
+    cur.execute(
+        "SELECT (SELECT count(*) FROM payroll.hours_run WHERE pay_week_end = %(w)s) AS prod_runs, "
+        "       (SELECT count(*) FROM staging.record "
+        "         WHERE record_type = 'payroll_hours_run' AND row_status IN ('pending','verified') "
+        "           AND payload->>'pay_week_end' = %(w)s::text) AS staged_runs",
+        {"w": week_end},
+    )
+    runs = cur.fetchone()
+
+    cur.execute(
+        "SELECT e.employee_code, sum(hl.rostered_hours) AS hours "
+        "FROM payroll.hours_run r JOIN payroll.hours_line hl ON hl.run_id = r.id "
+        "JOIN payroll.employee e ON e.square_team_member_id = hl.square_team_member_id "
+        "WHERE r.pay_week_end = %s GROUP BY e.employee_code",
+        (week_end,),
+    )
+    prod = {r["employee_code"]: r["hours"] for r in cur.fetchall()}
+
+    cur.execute(
+        "SELECT e.employee_code, sum((c.payload->>'rostered_hours')::numeric) AS hours "
+        "FROM staging.record p JOIN staging.record c ON c.parent_uid = p.record_uid "
+        "JOIN payroll.employee e ON e.square_team_member_id = c.natural_key->>'square_team_member_id' "
+        "WHERE p.record_type = 'payroll_hours_run' AND p.row_status IN ('pending','verified') "
+        "  AND p.payload->>'pay_week_end' = %s::text "
+        "  AND c.record_type = 'payroll_hours_line' AND c.row_status <> 'deleted' "
+        "GROUP BY e.employee_code",
+        (week_end,),
+    )
+    staged = {r["employee_code"]: r["hours"] for r in cur.fetchall()}
+
+    out = {}
+    for ln in lines:
+        code = ln["employee_code"]
+        hours = prod.get(code, staged.get(code))
+        if not (runs["prod_runs"] or runs["staged_runs"]):
+            res = {"status": "NO HOURS RUN", "variance": None}
+        else:
+            res = _cross_check_status(ln["total_hours"], hours, tolerance)
+        res.update({"employee_code": code, "instruction_hours": ln["total_hours"],
+                    "rostered_hours": None if hours is None else float(hours)})
+        out[ln["record_uid"]] = res
+    return {"mode": rule.get("mode", "warn"), "tolerance_hours": float(tolerance),
+            "week_end": week_end, "lines": out}
+
+
+def _cross_check_blockers(xc, only_uid=None):
+    """Lines a block-mode cross_check refuses to let through."""
+    if not xc or xc["mode"] != "block":
+        return []
+    return [v for uid, v in xc["lines"].items()
+            if v["status"] == "VARIANCE" and (only_uid is None or uid == only_uid)]
+
+
+def _refuse_on_cross_check(blockers):
+    if blockers:
+        names = ", ".join("%s (%+.2f h)" % (b["employee_code"], b["variance"]) for b in blockers)
+        raise HTTPException(status_code=422, detail={
+            "message": "Blocked: pay instruction differs from Square rostered hours by more "
+                       "than the tolerance for %s. Correct the hours or the record first." % names,
+            "cross_check": blockers})
+
+
 class IngestRunBody(BaseModel):
     by: str = "Tom"
 
@@ -1071,10 +1174,11 @@ def get_record(record_uid: str):
 
         calc = _reconcile(cur, record_uid, spec)
         verdict = _reconcile_verdict((record["payload"] or {}).get("amount_inc_gst"), calc)
+        xc = _cross_check(cur, record_uid, record["record_type"], record["payload"] or {}, spec)
 
         return {"record": record, "spec": spec,
                 "children": [groups[rt] for rt in order],
-                "reconcile": verdict}
+                "reconcile": verdict, "cross_check": xc}
 
 
 @app.patch("/api/record/{record_uid}")
@@ -1124,6 +1228,21 @@ def edit_record(record_uid: str, edit: CellEdit):
 @app.post("/api/record/{record_uid}/verify")
 def verify_record(record_uid: str, body: VerifyBody):
     with db() as conn, dictcur(conn) as cur:
+        if body.verified:
+            cur.execute("SELECT record_type, payload, parent_uid FROM staging.record "
+                        "WHERE record_uid = %s AND row_status IN ('pending','verified')",
+                        (record_uid,))
+            row = cur.fetchone()
+            if row is not None:
+                # A line is checked on its own; a parent on all of its lines.
+                parent_uid = row["parent_uid"] or record_uid
+                cur.execute("SELECT record_type, payload FROM staging.record WHERE record_uid = %s",
+                            (parent_uid,))
+                prow = cur.fetchone()
+                pspec = _spec_for(cur, prow["record_type"])
+                xc = _cross_check(cur, parent_uid, prow["record_type"], prow["payload"] or {}, pspec)
+                _refuse_on_cross_check(_cross_check_blockers(
+                    xc, only_uid=record_uid if row["parent_uid"] else None))
         cur.execute(
             "UPDATE staging.record SET row_status = %s, verified_by = %s, verified_at = %s "
             "WHERE record_uid = %s AND row_status IN ('pending','verified')",
@@ -1141,6 +1260,13 @@ def verify_record(record_uid: str, body: VerifyBody):
 @app.post("/api/record/{record_uid}/verify-children")
 def verify_children(record_uid: str, body: VerifyBody):
     with db() as conn, dictcur(conn) as cur:
+        cur.execute("SELECT record_type, payload FROM staging.record WHERE record_uid = %s",
+                    (record_uid,))
+        prow = cur.fetchone()
+        if prow is not None:
+            xc = _cross_check(cur, record_uid, prow["record_type"], prow["payload"] or {},
+                              _spec_for(cur, prow["record_type"]))
+            _refuse_on_cross_check(_cross_check_blockers(xc))
         cur.execute(
             "UPDATE staging.record SET row_status = 'verified', verified_by = %s, "
             "verified_at = %s WHERE parent_uid = %s AND row_status = 'pending'",

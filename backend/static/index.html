@@ -138,6 +138,7 @@
   .childwrap{ overflow-x:auto; margin-bottom:20px; }
   .recon{ border-left:3px solid var(--rule); background:var(--surface); padding:9px 14px; margin:0 0 16px; font-size:12.5px; }
   .recon.ok{ border-left-color:var(--ok, #4a7c50); }
+  tr.xc-bad td{ background:rgba(180,50,50,.10); }
   .recon.bad{ border-left-color:var(--danger); color:var(--danger); font-weight:600; }
 </style>
 </head>
@@ -750,6 +751,23 @@ async function renderQueue(tab){
   });
 }
 
+function xcBanner(xc){
+  const rows = Object.values(xc.lines);
+  const bad = rows.filter(r => r.status === "VARIANCE");
+  const gaps = rows.filter(r => r.status === "NOT IN HOURS RUN" || r.status === "NO HOURS RUN");
+  const tol = (xc.tolerance_hours * 60).toFixed(0);
+  if(bad.length){
+    const list = bad.map(r => `${esc(r.employee_code)} paid ${r.instruction_hours} h, rostered ${r.rostered_hours} h (${r.variance > 0 ? "+" : ""}${r.variance.toFixed(2)})`).join("; ");
+    return `<div class="recon bad">Pay does not match Square rostered hours beyond ${tol} minutes: ${list}.${
+      xc.mode === "block" ? " Verification is blocked until this is corrected." : ""}</div>`;
+  }
+  if(gaps.length){
+    return `<div class="recon">Cannot compare ${gaps.length} line(s) to Square hours &mdash; ${
+      rows.some(r => r.status === "NO HOURS RUN") ? "no hours run for the week ending " + toDMY(xc.week_end) + " is staged or promoted yet" : "not in that week's hours run"}. Not blocking.</div>`;
+  }
+  return `<div class="recon ok">All ${rows.length} line(s) match Square rostered hours within ${tol} minutes.</div>`;
+}
+
 async function renderRecord(uid, tab){
   const data = await api(`/record/${uid}`);
   const rec = data.record, spec = data.spec;
@@ -757,6 +775,7 @@ async function renderRecord(uid, tab){
   const fields = (spec.field_spec || {}).fields || [];
   const prov = rec.provenance || {};
   const recon = data.reconcile;
+  const xc = data.cross_check;
 
   viewEl.innerHTML = `
     <div class="lines-header" style="margin-bottom:14px;">
@@ -777,6 +796,7 @@ async function renderRecord(uid, tab){
         ? `Lines reconcile: ${recon.lines} line(s) total $${money(recon.actual)} against the header.`
         : `Lines do not reconcile: ${recon.lines} line(s) total $${money(recon.actual)} against a header of $${money(recon.expected)} &mdash; out by $${money(Math.abs(recon.variance))}. Lines marked outside the invoice total are excluded from the sum.`
     }</div>` : ""}
+    ${xc ? xcBanner(xc) : ""}
     ${prov.notes ? `<div class="provenance"><span class="plabel">Why this was staged this way &mdash; from ${
       esc(prov.source_workbook || "the weekly review")} (read only)</span>${esc(prov.notes)}</div>` : ""}
     <div id="gParty"></div>
@@ -816,15 +836,21 @@ async function renderRecord(uid, tab){
     const tbody = sec.querySelector("tbody");
     group.rows.forEach(row => {
       const tr = document.createElement("tr");
+      const xcl = xc && xc.lines[row.record_uid];
       if(row.row_status === "verified") tr.className = "verified";
+      if(xcl && xcl.status === "VARIANCE") tr.className += " xc-bad";
+      if(xcl && xcl.status === "VARIANCE") tr.title = `Paid ${xcl.instruction_hours} h, Square rostered ${xcl.rostered_hours} h`;
       const tick = document.createElement("td");
       const box = document.createElement("input");
       box.type = "checkbox"; box.style.width = "auto";
       box.checked = row.row_status === "verified";
       box.addEventListener("change", async () => {
-        await api(`/record/${row.record_uid}/verify`,
-          { method:"POST", body: JSON.stringify({ verified: box.checked }) });
+        try{
+          await api(`/record/${row.record_uid}/verify`,
+            { method:"POST", body: JSON.stringify({ verified: box.checked }) });
+        }catch(err){ box.checked = !box.checked; toast(err.message); return; }
         tr.className = box.checked ? "verified" : "";
+        if(xcl && xcl.status === "VARIANCE") tr.className += " xc-bad";
       });
       tick.appendChild(box); tr.appendChild(tick);
       gf.forEach(f => {
@@ -836,8 +862,10 @@ async function renderRecord(uid, tab){
       tbody.appendChild(tr);
     });
     sec.querySelector("[data-verifyall]").addEventListener("click", async () => {
-      const res = await api(`/record/${uid}/verify-children`,
-        { method:"POST", body: JSON.stringify({ verified: true }) });
+      let res;
+      try{ res = await api(`/record/${uid}/verify-children`,
+        { method:"POST", body: JSON.stringify({ verified: true }) }); }
+      catch(err){ toast(err.message); return; }
       toast(`Verified ${res.verified} row(s)`);
       renderRecord(uid, tab);
     });
@@ -846,8 +874,10 @@ async function renderRecord(uid, tab){
 
   document.getElementById("gBack").addEventListener("click", () => selectTab(tab));
   document.getElementById("gVerify").addEventListener("change", async (e) => {
-    await api(`/record/${uid}/verify`,
-      { method:"POST", body: JSON.stringify({ verified: e.target.checked }) });
+    try{
+      await api(`/record/${uid}/verify`,
+        { method:"POST", body: JSON.stringify({ verified: e.target.checked }) });
+    }catch(err){ e.target.checked = !e.target.checked; toast(err.message); return; }
     toast(e.target.checked ? "Verified" : "Unverified");
   });
   document.getElementById("gDelete").addEventListener("click", async () => {

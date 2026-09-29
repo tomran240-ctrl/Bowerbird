@@ -107,10 +107,9 @@ Details:
   required: false` because the ingester rejects any payload key the registry
   does not declare (`validate_payload`), and the weekly task plus 22 pending
   lines still carry it. The UI skips hidden fields (record fields and child
-  columns). `promote.py` PROMOTERS `cafe_invoice` has `child_exclude:
-  {"gst_assessed"}`, applied identically in the plan preview and the write (the
-  dry-run-must-equal-real-run trap). `cafe.purchases.gst_assessed` column is
-  untouched. The reconcile line sum is now
+  columns). **SUPERSEDED by section 9:** an earlier commit excluded it from promotion; that
+  exclusion was removed because it is the only GST on many lines. `promote.py`
+  still supports `child_exclude`, applied identically in preview and write. The reconcile line sum is now
   `line_total + coalesce(gst_declared, gst_assessed, 0)` (matches the legacy
   pattern at the old main.py line 121) so lines carrying only an assessed figure
   still reconcile. `PRODUCER-weekly-inbox-filing-review.md` updated: the
@@ -304,3 +303,69 @@ SELECT record_type, row_status, count(*) FROM staging.record GROUP BY 1,2 ORDER 
 SELECT match_type, count(*) FROM staging.record
 WHERE record_type IN ('cafe_invoice','kw_invoice') GROUP BY 1;   -- who the new block affects
 ```
+
+---
+
+## 9. Corrections and decisions after this document was first written
+
+(From the later session Tom pasted back as section 12 of `HANDOVER.md`. Facts
+about the database come from that session, not from this one.)
+
+### 9.1 `gst_assessed` is still written to production - code changed
+`cafe.purchases.gst_assessed` is nullable, has no default, and the table has no
+triggers, so omitting it writes NULL. Historical: 4027 rows, 1744 with a
+non-zero assessed and no declared GST. Promoted 29 Sep: 30 rows, 14 the same.
+For those it is the only GST on the line. The `child_exclude` was **removed**
+from `promote.py`; "drop the field" is satisfied by `hidden: true` alone.
+Migration 021's header comment was corrected. The reconcile sum
+(`line_total + coalesce(gst_declared, gst_assessed, 0)`) stays.
+
+### 9.2 Supplier-normalisation block ships as built
+No verified or imported record is affected: all 18 `cafe_invoice` are `alias`;
+`kw_invoice` has 13 `exact`, 2 `alias`, 1 `fuzzy` (pending), 3 `none`. The block
+newly refuses exactly one pending record.
+
+### 9.3 PDF search path - code changed
+`backend/staging_env.sh` now defaults `VERIFIER_PDF_ROOTS` to INBOX TO FILE
+first, then Invoice Inwards - Cafe / 115KW / 117KW / 115KW Electricity / 117KW
+Electricity, then Accountant Batch - Cafe - July 2026. The inbox stays in the
+path permanently: 11 of 18 cafe invoices (21-28 Sep) are still unfiled, and it
+holds 304 PDFs. `_find_document` now prefers a hit outside any `Duplicates*`
+folder. Override by exporting `VERIFIER_PDF_ROOTS` before `./run.sh`.
+
+### 9.4 Bank statements: three shapes (for the `bank_debit` producer)
+Sources: `Bank Statements Cafe/Processed/<YYYY_MM>/` (5 workbooks + PDFs) and
+newer statements in `INBOX TO FILE`.
+- **Shape A (current CBA):** sheets `Bank Transactions`, `Account Details`;
+  header `Date | Transaction Details | Value Date | Debit | Credit | Balance`;
+  dates are `DD/MM/YYYY` strings; Value Date filled for card rows, empty for
+  direct credits; a row has a Debit or a Credit, never both; ascending by date.
+- **Shape B (older):** same header, Value Date empty; the value date, amount and
+  balance are embedded in the description
+  (`... Value Date: 30/09/2025 40.21 $ $9,217.30 CR`).
+- **Shape C (different export):** one sheet named with the account number;
+  header `Process date | Description | Currency Code | " Debit" | " Credit"`
+  (leading spaces on two names); `Process date` is a real datetime; no Balance;
+  rows **descending**. The two `Cafe CBA Acc ... invoices required - <range>.csv`
+  files are Shape C as CSV (67 and 81 rows; 45 and 54 with a debit) - a derived
+  "debits awaiting an invoice" extract; the workbook is the source.
+- The producer must detect the shape from the header and normalise to
+  `{process_date, description, value_date, debit, credit, balance_or_none}`,
+  reading the value date from the column or parsing it out of the description,
+  and treating an embedded amount as a cross-check on Debit.
+- **Identity:** sheet position is not stable (exports overlap, with different
+  shapes and row counts) and Shape C has no balance. Use
+  `{account_ref, process_date, debit, description, occurrence}`, where
+  `occurrence` is the ordinal among otherwise-identical rows after a
+  deterministic sort (date, amount, description). `account_ref` is a label Tom
+  chooses, never the account number.
+- Still needed from Tom: which files feed it, and whether `bank_debit` is
+  promoted to a `cafe` table or match-only (the registry needs a target either way).
+
+### 9.5 Deployment state
+The Desktop app folder is a git repo on branch `verifier-app-import`, **not** the
+working branch. None of this document's code, nor migration 021, is on that
+disk; Tom must `git pull` the working branch there. To make rule bodies readable
+offline:
+`psql kws115 -At -c "SELECT body FROM normalisation.v_rules_current WHERE rule_id='RULE-SQL'" > db/RULE-SQL-v8.txt`
+and commit it (`db/RULE-STG-draft-body.txt` is the precedent).

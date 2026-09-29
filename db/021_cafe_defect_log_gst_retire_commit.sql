@@ -18,8 +18,10 @@
      3  staging.record_type cafe_line marks gst_assessed hidden and not
         editable. It is NOT removed from the registry: the ingester refuses a
         batch carrying a field the registry does not declare, and the weekly
-        producer and 22 pending lines still carry it. promote.py no longer
-        writes it (PROMOTERS cafe_invoice child_exclude).
+        producer and 22 pending lines still carry it. It is still written to
+        cafe.purchases.gst_assessed on promotion, because that column holds the
+        only GST on many lines (Tom, 29 September). Hidden means hidden from
+        the screens, not dropped from production.
 
    This script writes no rule versions, so RULE-SQL pre-flight point 8 has no
    (rule_id, version) pair to compare.

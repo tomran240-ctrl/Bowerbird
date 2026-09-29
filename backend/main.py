@@ -841,25 +841,44 @@ def _reconcile(cur, record_uid, spec):
     rule = (spec["validation"] or {}).get("reconcile")
     if not rule:
         return None
-    if rule.get("sum") != "line_total_inc_gst":
-        return {"error": "unknown reconcile sum '%s'" % rule.get("sum")}
+    what = rule.get("sum")
+    against = rule.get("against") or "amount_inc_gst"
+    mode = rule.get("mode", "warn")
 
-    cur.execute(
-        "SELECT coalesce(sum("
-        "   (payload->>'line_total')::numeric "
-        "   + coalesce((payload->>'gst_assessed')::numeric, 0)"
-        "), 0) AS total, count(*) AS lines "
-        "FROM staging.record "
-        "WHERE parent_uid = %s AND record_type = %s AND row_status <> 'deleted' "
-        "  AND coalesce((payload->>'in_invoice_total')::boolean, true)",
-        (record_uid, rule["children"]),
-    )
+    if what == "line_total_inc_gst":
+        cur.execute(
+            "SELECT coalesce(sum("
+            "   (payload->>'line_total')::numeric "
+            "   + coalesce((payload->>'gst_assessed')::numeric, 0)"
+            "), 0) AS total, count(*) AS lines, count(*) AS with_field "
+            "FROM staging.record "
+            "WHERE parent_uid = %s AND record_type = %s AND row_status <> 'deleted' "
+            "  AND coalesce((payload->>'in_invoice_total')::boolean, true)",
+            (record_uid, rule["children"]),
+        )
+    else:
+        # Any other name is a numeric field on the child payload, summed as is.
+        # Lines lacking the field are counted so a mis-spelt field in the
+        # registry is reported, not read as a total of zero.
+        cur.execute(
+            "SELECT coalesce(sum((payload->>%s)::numeric), 0) AS total, count(*) AS lines, "
+            "       count(payload->>%s) AS with_field "
+            "FROM staging.record "
+            "WHERE parent_uid = %s AND record_type = %s AND row_status <> 'deleted'",
+            (what, what, record_uid, rule["children"]),
+        )
     got = cur.fetchone()
-    return {"lines": got["lines"], "actual": got["total"],
-            "against": rule.get("against"), "mode": rule.get("mode", "warn")}
+    if got["with_field"] != got["lines"]:
+        return {"error": "%d of %d %s line(s) have no '%s' value to sum"
+                         % (got["lines"] - got["with_field"], got["lines"],
+                            rule["children"], what),
+                "mode": mode}
+    return {"lines": got["lines"], "actual": got["total"], "against": against,
+            "sum": what, "mode": mode,
+            "tolerance": rule.get("tolerance", "0.02" if what == "line_total_inc_gst" else "0.05")}
 
 
-def _reconcile_verdict(header_value, calc, tolerance=Decimal("0.02")):
+def _reconcile_verdict(header_value, calc, tolerance=None):
     if not calc or "error" in calc or calc["lines"] == 0:
         return None
     if header_value is None:
@@ -867,12 +886,30 @@ def _reconcile_verdict(header_value, calc, tolerance=Decimal("0.02")):
     try:
         expected = Decimal(str(header_value))
         actual = Decimal(str(calc["actual"]))
+        tol = Decimal(str(tolerance if tolerance is not None else calc.get("tolerance", "0.02")))
     except (ArithmeticError, ValueError):
         return None
     variance = (expected - actual).quantize(Decimal("0.01"))
     return {"expected": float(expected), "actual": float(actual),
-            "variance": float(variance), "ok": abs(variance) <= tolerance,
-            "lines": calc["lines"], "mode": calc["mode"]}
+            "variance": float(variance), "ok": abs(variance) <= tol,
+            "lines": calc["lines"], "mode": calc["mode"],
+            "against": calc["against"], "sum": calc["sum"]}
+
+
+def _reconcile_for(cur, record_uid, payload, spec):
+    calc = _reconcile(cur, record_uid, spec)
+    against = (calc or {}).get("against", "amount_inc_gst")
+    return calc, _reconcile_verdict(payload.get(against), calc)
+
+
+def _refuse_on_reconcile(calc, verdict):
+    if verdict and not verdict["ok"] and verdict["mode"] == "block":
+        raise HTTPException(status_code=422, detail={
+            "message": "Blocked: the %d line(s) sum to %s but the header says %s (%s), out by %s. "
+                       "Correct the lines or the header first."
+                       % (verdict["lines"], verdict["actual"], verdict["expected"],
+                          verdict["against"], abs(verdict["variance"])),
+            "reconcile": verdict})
 
 
 def _cross_check_status(instruction_hours, rostered_hours, tolerance):
@@ -1112,8 +1149,7 @@ def queue(tab_key: str):
             title_f, date_f, amount_f = _summary_field_names(specs[rt]["field_spec"])
             payload = r["payload"] or {}
             ready = r["row_status"] == "verified" and r["child_verified"] == r["child_count"]
-            calc = _reconcile(cur, r["record_uid"], specs[rt])
-            verdict = _reconcile_verdict(payload.get("amount_inc_gst"), calc)
+            calc, verdict = _reconcile_for(cur, r["record_uid"], payload, specs[rt])
             out.append({
                 "record_uid": r["record_uid"],
                 "record_type": rt,
@@ -1172,13 +1208,13 @@ def get_record(record_uid: str):
                 order.append(rt)
             groups[rt]["rows"].append(k)
 
-        calc = _reconcile(cur, record_uid, spec)
-        verdict = _reconcile_verdict((record["payload"] or {}).get("amount_inc_gst"), calc)
+        calc, verdict = _reconcile_for(cur, record_uid, record["payload"] or {}, spec)
         xc = _cross_check(cur, record_uid, record["record_type"], record["payload"] or {}, spec)
 
         return {"record": record, "spec": spec,
                 "children": [groups[rt] for rt in order],
-                "reconcile": verdict, "cross_check": xc}
+                "reconcile": verdict,
+                "reconcile_error": (calc or {}).get("error"), "cross_check": xc}
 
 
 @app.patch("/api/record/{record_uid}")
@@ -1243,6 +1279,9 @@ def verify_record(record_uid: str, body: VerifyBody):
                 xc = _cross_check(cur, parent_uid, prow["record_type"], prow["payload"] or {}, pspec)
                 _refuse_on_cross_check(_cross_check_blockers(
                     xc, only_uid=record_uid if row["parent_uid"] else None))
+                if not row["parent_uid"]:
+                    _refuse_on_reconcile(*_reconcile_for(
+                        cur, record_uid, row["payload"] or {}, pspec))
         cur.execute(
             "UPDATE staging.record SET row_status = %s, verified_by = %s, verified_at = %s "
             "WHERE record_uid = %s AND row_status IN ('pending','verified')",

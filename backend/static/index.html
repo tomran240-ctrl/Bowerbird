@@ -751,6 +751,20 @@ async function renderQueue(tab){
   });
 }
 
+function reconBanner(recon, err){
+  if(err) return `<div class="recon bad">Cannot check lines against the header: ${esc(err)}.</div>`;
+  if(!recon) return "";
+  const u = recon.sum === "line_total_inc_gst" ? ["$", ""] : (/hours$/.test(recon.sum) ? ["", " h"] : ["", ""]);
+  const m = n => u[0] + money(n) + u[1];
+  const blocking = recon.mode === "block" ? " Verification is blocked until this is corrected." : "";
+  return `<div class="recon ${recon.ok ? "ok" : "bad"}">${
+    recon.ok
+      ? `Lines reconcile: ${recon.lines} line(s) total ${m(recon.actual)} against the header.`
+      : `Lines do not reconcile: ${recon.lines} line(s) total ${m(recon.actual)} against a header of ${m(recon.expected)} &mdash; out by ${m(Math.abs(recon.variance))}.${
+          recon.sum === "line_total_inc_gst" ? " Lines marked outside the invoice total are excluded from the sum." : ""}${blocking}`
+  }</div>`;
+}
+
 function xcBanner(xc){
   const rows = Object.values(xc.lines);
   const bad = rows.filter(r => r.status === "VARIANCE");
@@ -791,11 +805,7 @@ async function renderRecord(uid, tab){
     <h3 style="margin:0 0 4px;">${esc(rec.party_name || spec.label)}</h3>
     <div class="meta" style="margin-bottom:16px;">${esc(spec.label)} &middot; ${
       Object.entries(rec.natural_key || {}).map(([k,v]) => `${esc(k)}: ${esc(v)}`).join(" &middot; ")}</div>
-    ${recon ? `<div class="recon ${recon.ok ? "ok" : "bad"}">${
-      recon.ok
-        ? `Lines reconcile: ${recon.lines} line(s) total $${money(recon.actual)} against the header.`
-        : `Lines do not reconcile: ${recon.lines} line(s) total $${money(recon.actual)} against a header of $${money(recon.expected)} &mdash; out by $${money(Math.abs(recon.variance))}. Lines marked outside the invoice total are excluded from the sum.`
-    }</div>` : ""}
+    ${reconBanner(recon, data.reconcile_error)}
     ${xc ? xcBanner(xc) : ""}
     ${prov.notes ? `<div class="provenance"><span class="plabel">Why this was staged this way &mdash; from ${
       esc(prov.source_workbook || "the weekly review")} (read only)</span>${esc(prov.notes)}</div>` : ""}

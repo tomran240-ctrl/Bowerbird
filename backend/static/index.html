@@ -1,0 +1,1008 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bowerbird Verifier</title>
+<link rel="stylesheet" href="./vendor/tabulator.min.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:      #FBF8F2;
+    --surface:    #FFFFFF;
+    --ink:        #1B2A3B;
+    --ink-soft:   #5B6672;
+    --rule:       #E3DCC9;
+    --accent:     #55707C;
+    --accent-ink: #FBF8F2;
+    --flag:       #A9793D;
+    --flag-bg:    #F3E7D2;
+    --ok:         #5F6B4F;
+    --ok-bg:      #E8EBE0;
+    --danger:     #9C4A3A;
+    --danger-bg:  #F4E3DE;
+    --brand-gold: #C2A278;
+  }
+  *{ box-sizing:border-box; }
+  html,body{ margin:0; height:100%; }
+  body{
+    background:var(--paper); color:var(--ink);
+    font-family:"IBM Plex Mono", ui-monospace, monospace;
+    font-size:14px; line-height:1.5;
+  }
+  h1,h2,.display{ font-family:"Helvetica Neue", Helvetica, Arial, sans-serif; font-weight:700; letter-spacing:0.2px; }
+  .app{ max-width:100%; margin:0; padding:22px 32px 80px; }
+
+  .topbar{ display:flex; align-items:center; justify-content:space-between; border-bottom:3px solid var(--brand-gold); padding-bottom:14px; margin-bottom:24px; }
+  .topbar .brand{ display:flex; align-items:center; gap:12px; }
+  .topbar .logo{ flex:none; height:40px; width:auto; }
+  .topbar h1{ font-size:26px; margin:0; }
+  .topbar .subtitle{ color:var(--ink-soft); font-size:12.5px; margin-top:2px; }
+
+  button{ font-family:inherit; font-size:13px; cursor:pointer; border:1px solid var(--ink); background:var(--surface); color:var(--ink); padding:8px 14px; border-radius:2px; }
+  button:hover{ background:var(--ink); color:var(--paper); }
+  button:disabled{ opacity:0.35; cursor:not-allowed; background:var(--surface); color:var(--ink); }
+  button.primary{ background:var(--accent); border-color:var(--accent); color:var(--accent-ink); }
+  button.primary:hover{ filter:brightness(1.12); }
+  button.primary:disabled{ background:var(--surface); border-color:var(--rule); color:var(--ink-soft); }
+  button.ghost{ border-color:transparent; background:transparent; padding:6px 8px; }
+  button.ghost:hover{ background:var(--rule); color:var(--ink); }
+  button.small{ padding:5px 10px; font-size:12px; }
+
+  .invoice-list{ border-top:1px solid var(--rule); }
+  .invoice-row{ display:flex; align-items:center; justify-content:space-between; padding:16px 4px; border-bottom:1px solid var(--rule); cursor:pointer; }
+  .invoice-row:hover{ background:var(--surface); }
+  .invoice-row .name{ font-family:"Helvetica Neue", Helvetica, Arial, sans-serif; font-size:16px; font-weight:700; }
+  .invoice-row .meta{ color:var(--ink-soft); font-size:12px; margin-top:4px; }
+  .invoice-row .right{ display:flex; align-items:center; gap:10px; }
+  .empty-note{ color:var(--ink-soft); padding:40px 4px; text-align:center; font-size:13px; }
+
+  .badge{ font-size:11px; padding:2px 8px; border-radius:2px; border:1px solid; white-space:nowrap; }
+  .badge.flag{ color:var(--flag); border-color:var(--flag); background:var(--flag-bg); }
+  .badge.ok{ color:var(--ok); border-color:var(--ok); background:var(--ok-bg); }
+  .badge.danger{ color:var(--danger); border-color:var(--danger); background:var(--danger-bg); }
+  .badge.progress{ color:var(--ink-soft); border-color:var(--rule); }
+
+  .detail-header{ display:flex; align-items:center; justify-content:space-between; margin-bottom:16px; }
+  .detail-header .left{ display:flex; align-items:center; gap:12px; }
+  .detail-header h2{ font-size:19px; margin:0; }
+
+  .banner{ display:flex; align-items:center; gap:10px; padding:12px 16px; margin-bottom:14px; border:1px solid var(--ok); background:var(--ok-bg); color:var(--ok); font-size:13px; }
+  .banner.warn{ border-color:var(--danger); background:var(--danger-bg); color:var(--danger); }
+
+  .supplier-picker{ position:relative; }
+  .supplier-picker .row{ display:flex; gap:6px; }
+  .supplier-picker input[type=text]{ flex:1; }
+  .supplier-picker .suggestions{
+    position:absolute; top:100%; left:0; right:0; z-index:20;
+    background:var(--surface); border:1px solid var(--ink); border-top:none;
+    max-height:220px; overflow-y:auto; display:none;
+  }
+  .supplier-picker .suggestions.show{ display:block; }
+  .supplier-picker .suggestions div{ padding:7px 10px; cursor:pointer; font-size:13px; }
+  .supplier-picker .suggestions div:hover{ background:var(--rule); }
+  .supplier-picker .suggestions .empty{ color:var(--ink-soft); cursor:default; }
+  .supplier-picker .suggestions .add-new{ color:var(--accent); font-weight:600; border-top:1px solid var(--rule); }
+  .matched-note{ font-size:11px; color:var(--ok); margin-top:4px; }
+  .flagged-note{ font-size:11.5px; color:var(--flag); margin-top:2px; }
+
+  .header-panel{ border:1px solid var(--ink); background:var(--surface); padding:16px; margin-bottom:18px; }
+  .header-grid{ display:grid; grid-template-columns:repeat(auto-fit, minmax(160px, 1fr)); gap:12px 20px; }
+  .field label{ display:block; font-size:11px; color:var(--ink-soft); margin-bottom:3px; }
+  .field input, .field select{ width:100%; font-family:inherit; font-size:13px; padding:6px 8px; border:1px solid var(--rule); background:var(--paper); color:var(--ink); }
+  .field input:focus, .field select:focus{ outline:none; border-color:var(--accent); }
+  .field.wide{ grid-column:1 / -1; }
+  .header-actions{ display:flex; align-items:center; justify-content:space-between; margin-top:14px; padding-top:14px; border-top:1px solid var(--rule); }
+  .pdf-link{ color:var(--accent); text-decoration:none; font-weight:600; }
+  .pdf-link:hover{ text-decoration:underline; }
+
+  .lines-header{ display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
+  .lines-header h3{ font-family:"Helvetica Neue", Helvetica, Arial, sans-serif; font-size:14px; margin:0; }
+
+  .tabulator{ border:1px solid var(--ink); background:var(--surface); font-family:"IBM Plex Mono", monospace; font-size:12.5px; }
+  .tabulator .tabulator-header{ background:var(--surface); border-bottom:2px solid var(--ink); color:var(--ink); font-weight:600; }
+  .tabulator .tabulator-col{ background:var(--surface); }
+  .tabulator-row{ border-bottom:1px solid var(--rule); }
+  .tabulator-row.row-verified{ background:var(--ok-bg); }
+  .tabulator-row .tabulator-cell{ padding:6px 8px; }
+  .tabulator-row.row-verified .tabulator-cell{ color:var(--ink-soft); }
+  .tabulator .tabulator-cell.tabulator-editing input,
+  .tabulator .tabulator-cell.tabulator-editing select{ font-family:inherit; font-size:12.5px; border:1px solid var(--accent); }
+
+  .toast{ position:fixed; bottom:24px; left:50%; transform:translateX(-50%); background:var(--ink); color:var(--paper); padding:10px 18px; font-size:13px; border-radius:2px; opacity:0; pointer-events:none; transition:opacity 0.2s ease; }
+  .toast.show{ opacity:1; }
+
+  .mainnav{ display:flex; gap:2px; margin:-12px 0 22px; border-bottom:1px solid var(--rule); overflow-x:auto; }
+  .mainnav .navtab{ border:none; border-bottom:3px solid transparent; background:transparent; color:var(--ink-soft); padding:9px 14px; border-radius:0; white-space:nowrap; font-size:13px; }
+  .mainnav .navtab:hover{ background:var(--surface); color:var(--ink); }
+  .mainnav .navtab.active{ color:var(--ink); border-bottom-color:var(--brand-gold); font-weight:600; }
+  .mainnav .navcount{ display:inline-block; margin-left:7px; padding:1px 6px; font-size:11px; background:var(--surface); border:1px solid var(--rule); border-radius:9px; color:var(--ink-soft); }
+  .mainnav .navtab.active .navcount{ background:var(--brand-gold); border-color:var(--brand-gold); color:var(--ink); }
+  .invoice-row .meta.reject{ color:var(--danger); margin-top:5px; white-space:pre-wrap; }
+  .invoice-row.static{ cursor:default; }
+
+  .gfields{ display:grid; grid-template-columns:repeat(auto-fit, minmax(230px, 1fr)); gap:12px 18px; margin-bottom:18px; }
+  .gfield label{ display:block; font-size:11px; letter-spacing:0.04em; text-transform:uppercase; color:var(--ink-soft); margin-bottom:3px; }
+  .gfield input, .gfield select, .gfield textarea{ width:100%; font-family:"IBM Plex Mono", monospace; font-size:12.5px; padding:6px 8px; border:1px solid var(--rule); background:var(--paper); color:var(--ink); border-radius:2px; box-sizing:border-box; }
+  .gfield input:focus, .gfield select:focus, .gfield textarea:focus{ outline:none; border-color:var(--accent); }
+  .gfield.req label:after{ content:" *"; color:var(--accent); }
+  .provenance{ border-left:3px solid var(--brand-gold); background:var(--surface); padding:10px 14px; margin:0 0 18px; font-size:12.5px; line-height:1.5; white-space:pre-wrap; color:var(--ink-soft); }
+  .provenance .plabel{ display:block; font-size:11px; letter-spacing:0.04em; text-transform:uppercase; color:var(--ink-soft); margin-bottom:5px; font-family:"Helvetica Neue", Helvetica, Arial, sans-serif; }
+  .childtable{ width:100%; border-collapse:collapse; font-family:"IBM Plex Mono", monospace; font-size:12px; border:1px solid var(--ink); }
+  .childtable th{ background:var(--surface); border-bottom:2px solid var(--ink); text-align:left; padding:6px 8px; font-weight:600; white-space:nowrap; }
+  .childtable td{ border-bottom:1px solid var(--rule); padding:4px 6px; }
+  .childtable tr.verified{ background:var(--ok-bg); }
+  .childtable input, .childtable select{ width:100%; min-width:70px; font-family:inherit; font-size:12px; border:1px solid transparent; background:transparent; color:inherit; padding:3px 4px; box-sizing:border-box; }
+  .childtable input:focus, .childtable select:focus{ border-color:var(--accent); background:var(--paper); outline:none; }
+  .childwrap{ overflow-x:auto; margin-bottom:20px; }
+  .recon{ border-left:3px solid var(--rule); background:var(--surface); padding:9px 14px; margin:0 0 16px; font-size:12.5px; }
+  .recon.ok{ border-left-color:var(--ok, #4a7c50); }
+  .recon.bad{ border-left-color:var(--danger); color:var(--danger); font-weight:600; }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <div class="brand">
+      <img class="logo" src="./assets/bowerbird-mark.png" alt="Bowerbird">
+      <div>
+        <h1>Bowerbird Verifier</h1>
+        <div class="subtitle">Café invoices from the weekly inbox review — pending import to 115kws</div>
+      </div>
+    </div>
+    <div style="display:flex; align-items:center; gap:10px;">
+      <button class="ghost" id="refreshBtn">&#8635; Refresh</button>
+      <button class="primary" id="importAllBtn">Import all ready →</button>
+    </div>
+  </div>
+  <nav class="mainnav" id="mainnav"></nav>
+  <div id="view"></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="./vendor/tabulator.min.js"></script>
+<script>
+const API = "/api";
+const viewEl = document.getElementById("view");
+const toastEl = document.getElementById("toast");
+let categories = [];
+let organisations = [];
+
+function toast(msg){
+  toastEl.textContent = msg;
+  toastEl.classList.add("show");
+  setTimeout(()=> toastEl.classList.remove("show"), 3000);
+}
+
+async function api(path, opts){
+  console.log("[Verifier] api call:", opts?.method || "GET", API + path, opts?.body || "");
+  const res = await fetch(API + path, { headers: {"Content-Type":"application/json"}, ...opts });
+  const body = await res.json().catch(()=>null);
+  console.log("[Verifier] api response:", res.status, body);
+  if(!res.ok){
+    const err = new Error(body?.detail?.message || body?.detail || "Request failed");
+    err.detail = body?.detail;
+    throw err;
+  }
+  return body;
+}
+
+function esc(v){
+  // Workbook prose goes straight into innerHTML below. A note containing "<"
+  // would otherwise eat the rest of the panel, and provenance notes are a
+  // thousand characters of free text written by a process nobody watches.
+  if(v === null || v === undefined) return "";
+  return String(v).replace(/[&<>"']/g, c => (
+    {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+}
+
+function money(v){ return v === null || v === undefined || v === "" ? "" : Number(v).toFixed(2); }
+function toDMY(iso){
+  if(!iso) return "";
+  const m = String(iso).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if(!m) return iso;
+  return `${m[3]}/${m[2]}/${m[1]}`;
+}
+function toISO(dmy){
+  if(!dmy) return null;
+  const m = String(dmy).trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if(!m) return dmy; // already ISO, or unparseable - pass through and let the server validate
+  const [, d, mo, y] = m;
+  return `${y}-${mo.padStart(2,"0")}-${d.padStart(2,"0")}`;
+}
+function openPdf(filename){
+  window.open(`${API}/documents/${encodeURIComponent(filename)}`, "bowerbird_pdf_" + filename,
+    "width=1000,height=900,noopener,noreferrer");
+}
+
+// ---------------------------------------------------------------- home view
+
+async function renderHome(){
+  const { invoices, auto_ingest } = await api("/invoices");
+  if(auto_ingest && (auto_ingest.invoices_inserted > 0 || auto_ingest.lines_inserted > 0)){
+    toast(`Loaded ${auto_ingest.invoices_inserted} new invoice(s), ${auto_ingest.lines_inserted} new line(s)`);
+  }
+  if(auto_ingest?.errors?.length){
+    toast("Auto-load issue: " + auto_ingest.errors[0]);
+  }
+  const importBtn = document.getElementById("importAllBtn");
+  importBtn.disabled = invoices.length === 0 || !invoices.every(i => i.ready_to_import);
+
+  if(invoices.length === 0){
+    viewEl.innerHTML = `<div class="empty-note">No café invoices pending. Nothing has come through the weekly review since the last import.</div>`;
+    return;
+  }
+
+  viewEl.innerHTML = `<div class="invoice-list">${invoices.map(inv => `
+    <div class="invoice-row" data-id="${inv.staging_id}">
+      <div>
+        <div class="name">${inv.supplier_name} — ${inv.invoice_number}</div>
+        <div class="meta">${toDMY(inv.invoice_date)} · $${money(inv.amount_inc_gst)} · ${inv.verified_lines}/${inv.total_lines} lines verified${inv.header_verified ? " · header verified" : ""}</div>
+      </div>
+      <div class="right">
+        ${inv.flagged ? `<span class="badge flag">supplier match</span>` : ""}
+        ${!inv.reconciles ? `<span class="badge danger">doesn't reconcile</span>` : ""}
+        ${inv.ready_to_import ? `<span class="badge ok">Ready</span>` : `<span class="badge progress">In progress</span>`}
+      </div>
+    </div>
+  `).join("")}</div>`;
+
+  viewEl.querySelectorAll(".invoice-row").forEach(row => {
+    row.addEventListener("click", () => renderInvoice(row.dataset.id));
+  });
+}
+
+// ------------------------------------------------------------- detail view
+
+async function ensureCategories(){
+  if(categories.length === 0){
+    categories = await api("/categories");
+  }
+}
+async function ensureOrganisations(){
+  if(organisations.length === 0){
+    organisations = await api("/organisations");
+  }
+}
+
+function buildSupplierNote(invoice){
+  if(invoice.match_type === "fuzzy"){
+    return `<div class="flagged-note">Best guess — ${invoice.candidate_name} (${Math.round(invoice.match_score*100)}%)</div>`;
+  } else if(invoice.match_type === "none"){
+    return `<div class="flagged-note">No supplier match — check registration</div>`;
+  } else if(invoice.match_type === "exact"){
+    return `<div class="flagged-note">Matched by name — not yet a saved alias</div>`;
+  }
+  return "";
+}
+
+function buildStatusBanners(invoice){
+  const supplierNote = buildSupplierNote(invoice);
+  return `
+    ${invoice.flagged ? `<div class="banner warn">Supplier match needs a look before verifying.${supplierNote}</div>` : ""}
+    ${!invoice.reconciles ? `<div class="banner warn">Lines don't reconcile to the invoice total — gap of $${money(invoice.reconciliation_gap)}. Staging is still allowed, but check before verifying.</div>` : ""}
+    ${invoice.ready_to_import ? `<div class="banner">Ready to import — header and every line are verified.</div>` : ""}
+  `;
+}
+
+// Lightweight refresh used after a single cell/field edit: updates the
+// banners and the verified-count text WITHOUT touching the Tabulator grid
+// itself. A full renderInvoice() there would rebuild the whole DOM - fine
+// for a discrete click (verify, delete, add line), but destructive if the
+// operator is still mid-edit on another cell when an earlier edit's save
+// completes and triggers it. That was actually happening: editing several
+// cells on a freshly-added line in quick succession could wipe out
+// whatever was being typed into the next cell the moment the previous
+// cell's save round-trip finished and tore the grid down mid-keystroke.
+async function refreshInvoiceStatus(id){
+  const { invoice } = await api(`/invoices/${id}`);
+  const banners = document.getElementById("statusBanners");
+  if(banners) banners.innerHTML = buildStatusBanners(invoice);
+  const countEl = document.getElementById("lineCountText");
+  if(countEl) countEl.textContent = `Line items (${invoice.verified_lines}/${invoice.total_lines} verified)`;
+}
+
+async function renderInvoice(id){
+  await ensureCategories();
+  await ensureOrganisations();
+  const { invoice, lines } = await api(`/invoices/${id}`);
+
+  const supplierNote = buildSupplierNote(invoice);
+
+  const headerField = (label, field, value, type="text") => `
+    <div class="field">
+      <label>${label}</label>
+      <input type="${type}" data-field="${field}" value="${value ?? ""}">
+    </div>`;
+
+  viewEl.innerHTML = `
+    <div class="detail-header">
+      <div class="left">
+        <button class="ghost" id="backBtn">&larr; Back</button>
+        <h2>${invoice.supplier_name} — ${invoice.invoice_number}</h2>
+      </div>
+      <a class="pdf-link" href="${API}/documents/${encodeURIComponent(invoice.filename)}" onclick="openPdf('${invoice.filename.replace(/'/g,"\\'")}'); return false;">View PDF</a>
+    </div>
+
+    <div id="statusBanners">${buildStatusBanners(invoice)}</div>
+
+    <div class="header-panel">
+      <div class="header-grid">
+        ${headerField("Supplier (as printed)", "supplier_name", invoice.supplier_name)}
+        <div class="field">
+          <label>Matched contact</label>
+          <div class="supplier-picker">
+            <div class="row">
+              <input type="text" id="supplierPicker" placeholder="Search suppliers…"
+                     value="${(invoice.supplier_id ? organisations.find(o=>o.id===invoice.supplier_id)?.name : "") ?? ""}"
+                     autocomplete="off">
+              <button class="small" id="newSupplierBtn" type="button">+ New</button>
+            </div>
+            <div class="suggestions" id="supplierSuggestions"></div>
+          </div>
+          ${invoice.supplier_id ? `<div class="matched-note">Confirmed — writes an alias for "${invoice.supplier_name}"</div>` : ""}
+        </div>
+        ${headerField("Invoice #", "invoice_number", invoice.invoice_number)}
+        ${headerField("Invoice date (DD/MM/YYYY)", "invoice_date", toDMY(invoice.invoice_date))}
+        ${headerField("Ex GST", "amount_ex_gst", money(invoice.amount_ex_gst))}
+        ${headerField("GST", "gst_amount", money(invoice.gst_amount))}
+        ${headerField("Inc GST", "amount_inc_gst", money(invoice.amount_inc_gst))}
+        <div class="field">
+          <label>Payment status</label>
+          <select data-field="payment_status">
+            ${["Unpaid","Paid","Partially Paid","Disputed"].map(s => `<option value="${s}" ${s===invoice.payment_status?"selected":""}>${s}</option>`).join("")}
+          </select>
+        </div>
+        <div class="field wide">
+          <label>Notes</label>
+          <input type="text" data-field="notes" value="${(invoice.notes ?? "").replace(/"/g,'&quot;')}">
+        </div>
+      </div>
+      <div class="header-actions">
+        <label style="display:flex; align-items:center; gap:8px; font-size:13px;">
+          <input type="checkbox" id="headerVerifyBox" ${invoice.header_verified ? "checked" : ""}>
+          Header verified
+        </label>
+        <button class="danger" id="deleteInvoiceBtn" style="border-color:var(--danger); color:var(--danger);">Remove invoice</button>
+      </div>
+    </div>
+
+    <div class="lines-header">
+      <h3 id="lineCountText">Line items (${invoice.verified_lines}/${invoice.total_lines} verified)</h3>
+      <div>
+        <button class="small" id="addLineBtn">+ Add line</button>
+        <button class="small" id="verifyAllLinesBtn">Verify all lines</button>
+      </div>
+    </div>
+    <div id="grid"></div>
+  `;
+
+  document.getElementById("backBtn").addEventListener("click", renderHome);
+
+  viewEl.querySelectorAll(".header-panel [data-field]").forEach(el => {
+    el.addEventListener("change", async () => {
+      const value = el.dataset.field === "invoice_date" ? toISO(el.value) : el.value;
+      try{
+        await api(`/invoices/${id}`, { method:"PATCH", body: JSON.stringify({ field: el.dataset.field, value }) });
+        refreshInvoiceStatus(id);
+      }catch(err){ toast(err.message); }
+    });
+  });
+
+  // -------- supplier picker (search contacts.organisations, or add new) --------
+  const pickerInput = document.getElementById("supplierPicker");
+  const suggestionsEl = document.getElementById("supplierSuggestions");
+
+  async function chooseSupplier(supplierId, name){
+    try{
+      await api(`/invoices/${id}/supplier`, { method:"POST", body: JSON.stringify({ supplier_id: supplierId }) });
+      toast(`Matched to ${name}`);
+      renderInvoice(id);
+    }catch(err){ toast(err.message); }
+  }
+
+  function renderSuggestions(query){
+    const q = query.trim().toLowerCase();
+    const matches = q.length === 0 ? [] : organisations.filter(o => o.name.toLowerCase().includes(q)).slice(0, 8);
+    let html = "";
+    if(matches.length === 0 && q.length > 0){
+      html += `<div class="empty">No matches</div>`;
+    }
+    html += matches.map(o => `<div data-id="${o.id}" data-name="${o.name.replace(/"/g,'&quot;')}">${o.name}</div>`).join("");
+    suggestionsEl.innerHTML = html;
+    suggestionsEl.classList.toggle("show", q.length > 0);
+    suggestionsEl.querySelectorAll("div[data-id]").forEach(el => {
+      el.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        chooseSupplier(parseInt(el.dataset.id), el.dataset.name);
+      });
+    });
+  }
+
+  pickerInput.addEventListener("input", () => renderSuggestions(pickerInput.value));
+  pickerInput.addEventListener("focus", () => renderSuggestions(pickerInput.value));
+  pickerInput.addEventListener("blur", () => setTimeout(() => suggestionsEl.classList.remove("show"), 150));
+
+  document.getElementById("newSupplierBtn").addEventListener("click", async () => {
+    const name = prompt("New supplier name:", pickerInput.value.trim());
+    if(!name || !name.trim()) return;
+    try{
+      const org = await api("/organisations", { method:"POST", body: JSON.stringify({ name: name.trim() }) });
+      organisations.push(org);
+      organisations.sort((a,b) => a.name.localeCompare(b.name));
+      await chooseSupplier(org.id, org.name);
+    }catch(err){ toast(err.message); }
+  });
+
+  document.getElementById("headerVerifyBox").addEventListener("change", async (e) => {
+    try{
+      await api(`/invoices/${id}/verify`, { method:"POST", body: JSON.stringify({ verified: e.target.checked }) });
+      renderInvoice(id);
+    }catch(err){ toast(err.message); e.target.checked = !e.target.checked; }
+  });
+
+  document.getElementById("deleteInvoiceBtn").addEventListener("click", async () => {
+    if(!confirm("Remove this invoice? It won't be imported.")) return;
+    try{ await api(`/invoices/${id}`, { method:"DELETE" }); renderHome(); }
+    catch(err){ toast(err.message); }
+  });
+
+  document.getElementById("verifyAllLinesBtn").addEventListener("click", async () => {
+    try{ await api(`/invoices/${id}/lines/verify-all`, { method:"POST", body: JSON.stringify({ verified: true }) }); renderInvoice(id); }
+    catch(err){ toast(err.message); }
+  });
+
+  document.getElementById("addLineBtn").addEventListener("click", async () => {
+    try{ await api(`/invoices/${id}/lines`, { method:"POST" }); renderInvoice(id); }
+    catch(err){ toast(err.message); }
+  });
+
+  async function saveLineField(rowId, field, rawValue){
+    const value = field === "purchase_date" ? toISO(rawValue) : rawValue;
+    try{
+      await api(`/invoices/${id}/lines/${rowId}`, { method:"PATCH", body: JSON.stringify({ field, value }) });
+      refreshInvoiceStatus(id);
+    }catch(err){ toast(err.message); }
+  }
+
+  // Native <input>/<select> elements with our own `change` listener, wired
+  // via Tabulator's onRendered hook - NOT Tabulator's editor/cellEdited
+  // system. cellEdited turned out to be unreliable in Safari: it uses its
+  // own internal value-comparison to decide whether an edit "really"
+  // happened, and that check was silently never passing in Safari - no
+  // error, no save, the cell just visually reverted. A plain native input
+  // 'change' event doesn't have that failure mode in any browser.
+  function textInputFormatter(field, opts={}){
+    return (cell, params, onRendered) => {
+      const input = document.createElement("input");
+      input.type = "text";
+      input.value = opts.display ? opts.display(cell.getValue()) : (cell.getValue() ?? "");
+      input.style.cssText = "width:100%; border:none; background:transparent; font:inherit; color:inherit; padding:0;";
+      onRendered(() => {
+        input.addEventListener("change", () => {
+          const raw = opts.parse ? opts.parse(input.value) : input.value;
+          saveLineField(cell.getRow().getData()._row_id, field, raw);
+        });
+      });
+      return input;
+    };
+  }
+
+  function selectFormatter(field, options){
+    return (cell, params, onRendered) => {
+      const select = document.createElement("select");
+      select.style.cssText = "width:100%; border:none; background:transparent; font:inherit; color:inherit;";
+      const current = cell.getValue() ?? "";
+      Object.entries(options).forEach(([value, label]) => {
+        const opt = document.createElement("option");
+        opt.value = value; opt.textContent = label;
+        if(value === current) opt.selected = true;
+        select.appendChild(opt);
+      });
+      onRendered(() => {
+        select.addEventListener("change", () => {
+          saveLineField(cell.getRow().getData()._row_id, field, select.value || null);
+        });
+      });
+      return select;
+    };
+  }
+
+  function checkboxFormatter(field){
+    return (cell, params, onRendered) => {
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.checked = !!cell.getValue();
+      onRendered(() => {
+        input.addEventListener("change", () => {
+          saveLineField(cell.getRow().getData()._row_id, field, input.checked);
+        });
+      });
+      return input;
+    };
+  }
+
+  const categoryOptions = {"": "(none)"};
+  categories.forEach(c => categoryOptions[c.category] = c.category);
+
+  const gridColumns = [
+    {
+      title:"", field:"row_status", width:38, hozAlign:"center",
+      formatter: (cell) => cell.getValue()==="verified" ? "&#10003;" : "",
+      cellClick: async (e, cell) => {
+        const row = cell.getRow().getData();
+        try{
+          await api(`/invoices/${id}/lines/${row._row_id}/verify`, { method:"POST", body: JSON.stringify({ verified: row.row_status !== "verified" }) });
+          renderInvoice(id);
+        }catch(err){ toast(err.message); }
+      },
+    },
+    { title:"Date", field:"purchase_date", width:110,
+      formatter: textInputFormatter("purchase_date", { display: toDMY, parse: (v) => v }) },
+    { title:"Item", field:"item", widthGrow:2, formatter: textInputFormatter("item") },
+    { title:"Category", field:"category", formatter: selectFormatter("category", categoryOptions) },
+    { title:"Qty", field:"qty", width:60, formatter: textInputFormatter("qty") },
+    { title:"Unit cost", field:"unit_cost", width:90, formatter: textInputFormatter("unit_cost", { display: money }) },
+    { title:"Line total (ex GST)", field:"line_total", width:120, formatter: textInputFormatter("line_total", { display: money }) },
+    { title:"GST applic.", field:"gst_applicable", width:80, hozAlign:"center", formatter: checkboxFormatter("gst_applicable") },
+    { title:"GST declared", field:"gst_declared", width:100, formatter: textInputFormatter("gst_declared", { display: money }) },
+    { title:"GST assessed", field:"gst_assessed", width:100, formatter: textInputFormatter("gst_assessed", { display: money }) },
+    { title:"Expense type", field:"expense_type", width:130,
+      formatter: selectFormatter("expense_type", {"":"(none)","COGS":"COGS","Operating Expense":"Operating Expense","Non-Business":"Non-Business","Capital":"Capital"}) },
+    { title:"Surcharge src", field:"surcharge_source", width:110,
+      formatter: selectFormatter("surcharge_source", {"":"(none)","Invoice":"Invoice","Bank derived":"Bank derived"}) },
+    { title:"In total", field:"in_invoice_total", width:70, hozAlign:"center", formatter: checkboxFormatter("in_invoice_total") },
+    { title:"Notes", field:"notes", widthGrow:2, formatter: textInputFormatter("notes") },
+    {
+      title:"", field:"_row_id", width:36, hozAlign:"center",
+      formatter: () => "&#10005;",
+      cellClick: async (e, cell) => {
+        if(!confirm("Remove this line? It won't be imported.")) return;
+        try{ await api(`/invoices/${id}/lines/${cell.getRow().getData()._row_id}`, { method:"DELETE" }); renderInvoice(id); }
+        catch(err){ toast(err.message); }
+      },
+    },
+  ];
+
+  new Tabulator("#grid", {
+    data: lines,
+    layout: "fitDataStretch",
+    columns: gridColumns,
+    rowFormatter: (row) => {
+      row.getElement().classList.toggle("row-verified", row.getData().row_status === "verified");
+    },
+  });
+}
+
+// -------------------------------------------------------------- import all
+
+document.getElementById("importAllBtn").addEventListener("click", async () => {
+  if(currentTab && currentTab.kind === "queue"){
+    const btn = document.getElementById("importAllBtn");
+    btn.disabled = true;
+    try{
+      const res = await api("/promote", {
+        method: "POST",
+        body: JSON.stringify({ tab_key: currentTab.tab_key }),
+      });
+      if(res.message){ toast(res.message); }
+      (res.steps || []).forEach(st => {
+        const out = (st.output || "").trim();
+        const last = out.split("\n").filter(Boolean).pop() || "";
+        if(st.rc === 0){
+          toast(st.record_type + ": " + last);
+        }else{
+          // A block lists every problem; show the first and leave the rest
+          // in the terminal-style output the endpoint returns.
+          const problem = out.split("\n").find(l => l.trim().startsWith("- ")) || last;
+          toast(st.record_type + " blocked: " + problem.replace(/^\s*-\s*/, ""));
+        }
+      });
+    }catch(err){
+      toast(err.message);
+    }finally{
+      btn.disabled = false;
+    }
+    if(await loadNav()){
+      await selectTab(NAV.find(t => t.tab_key === currentTab.tab_key) || currentTab);
+    }
+    return;
+  }
+  // Legacy cafe path below - unreachable once every queue is registry driven.
+  if(!confirm("Import every ready invoice (and its lines) into 115kws? This can't be undone from here.")) return;
+  try{
+    const result = await api("/import", { method:"POST", body: JSON.stringify({}) });
+    toast(`Imported ${result.imported_invoices} invoice(s), ${result.imported_lines} line(s)`);
+    renderHome();
+  }catch(err){
+    if(err.detail?.blocking) toast("Still pending: " + err.detail.blocking.join(", "));
+    else if(err.detail?.errors) toast(err.detail.errors[0] + (err.detail.errors.length>1 ? ` (+${err.detail.errors.length-1} more)` : ""));
+    else toast(err.message);
+  }
+});
+
+// ----------------------------------------------------- registry driven view
+// This section contains no knowledge of any particular record type. Labels,
+// editors, required marks and enum options all come from field_spec.
+
+function fieldInput(f, value, onSave, enums){
+  const v = (value === null || value === undefined) ? "" : value;
+  if(f.editable === false){
+    // Part of the natural key. record_uid is a hash of it, so editing one here
+    // would decouple the record's identity from its content.
+    const span = document.createElement("div");
+    span.textContent = f.type === "date" ? toDMY(v) : String(v);
+    span.style.padding = "6px 0";
+    span.style.color = "var(--ink-soft)";
+    span.title = "Read only - part of this record's identity key";
+    return span;
+  }
+  if(f.type === "enum"){
+    const opts = (enums && enums[f.name]) || [];
+    const sel = document.createElement("select");
+    sel.innerHTML = `<option value=""></option>` +
+      opts.map(o => `<option value="${esc(o)}"${String(o) === String(v) ? " selected" : ""}>${esc(o)}</option>`).join("");
+    sel.addEventListener("change", () => onSave(sel.value));
+    return sel;
+  }
+  if(f.type === "boolean"){
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = v === true;
+    box.style.width = "auto";
+    box.addEventListener("change", () => onSave(box.checked));
+    return box;
+  }
+  if(f.type === "longtext"){
+    const ta = document.createElement("textarea");
+    ta.rows = 3; ta.value = v;
+    ta.addEventListener("change", () => onSave(ta.value));
+    return ta;
+  }
+  const inp = document.createElement("input");
+  inp.type = "text";
+  inp.value = f.type === "date" ? toDMY(v) : (f.type === "money" && v !== "" ? money(v) : v);
+  if(f.type === "date") inp.placeholder = "DD/MM/YYYY";
+  inp.addEventListener("change", () => onSave(f.type === "date" ? toISO(inp.value) : inp.value));
+  return inp;
+}
+
+async function saveRecordField(uid, field, value){
+  try{
+    await api(`/record/${uid}`, { method:"PATCH", body: JSON.stringify({ field, value }) });
+  }catch(err){
+    const msg = err.detail?.errors ? err.detail.errors[0] : err.message;
+    toast(msg);
+    throw err;
+  }
+}
+
+async function renderPartyPicker(uid, rec){
+  await ensureOrganisations();
+  const host = document.getElementById("gParty");
+  const note = rec.match_type === "alias"
+    ? "confirmed"
+    : (rec.candidate_name
+        ? `best guess ${esc(rec.candidate_name)}${rec.match_score ? " at " + Math.round(rec.match_score*100) + "%" : ""}`
+        : (rec.match_type === "exact" ? "name matched, alias not yet registered" : "no match"));
+  host.innerHTML = `
+    <div class="gfield${rec.flagged ? " req" : ""}" style="max-width:420px; margin-bottom:16px;">
+      <label>Matched contact &mdash; ${esc(note)}</label>
+      <input type="text" id="gPartyInput" autocomplete="off"
+             placeholder="${esc(rec.party_name || "Search contacts")}">
+      <div class="suggestions" id="gPartySug"></div>
+    </div>`;
+  const input = document.getElementById("gPartyInput");
+  const sug = document.getElementById("gPartySug");
+
+  function show(query){
+    const q = (query || "").trim().toLowerCase();
+    const hits = organisations
+      .filter(o => !q || o.name.toLowerCase().includes(q))
+      .slice(0, 8);
+    sug.innerHTML = hits.map(o =>
+      `<div class="suggestion" data-id="${o.id}">${esc(o.name)}</div>`).join("");
+    sug.classList.toggle("show", hits.length > 0);
+    sug.querySelectorAll(".suggestion").forEach(el => {
+      el.addEventListener("mousedown", async (e) => {
+        e.preventDefault();
+        const res = await api(`/record/${uid}/party`,
+          { method:"POST", body: JSON.stringify({ supplier_id: Number(el.dataset.id) }) });
+        toast(`Matched to ${res.party_name}`);
+        sug.classList.remove("show");
+        renderRecord(uid, currentTab);
+      });
+    });
+  }
+  input.addEventListener("input", () => show(input.value));
+  input.addEventListener("focus", () => show(input.value));
+  input.addEventListener("blur", () => setTimeout(() => sug.classList.remove("show"), 150));
+}
+
+async function renderQueue(tab){
+  const { records, sources } = await api(`/queue/${tab.tab_key}`);
+  if(!sources.length){
+    return renderStub(tab);
+  }
+  if(!records.length){
+    viewEl.innerHTML = `<div class="empty-note">Nothing pending in ${tab.label}.</div>`;
+    return;
+  }
+  viewEl.innerHTML = `<div class="invoice-list">${records.map(r => `
+    <div class="invoice-row" data-uid="${r.record_uid}">
+      <div>
+        <div class="name">${esc(r.title)}${r.reference ? " &mdash; " + esc(r.reference) : ""}</div>
+        <div class="meta">${esc(r.type_label)}${r.date ? " &middot; " + toDMY(r.date) : ""}${
+          (r.amount !== null && r.amount !== undefined) ? " &middot; $" + money(r.amount) : ""}${
+          r.child_count ? ` &middot; ${r.child_verified}/${r.child_count} lines verified` : ""}</div>
+      </div>
+      <div class="right">
+        ${r.flagged ? `<span class="badge flag">party match</span>` : ""}
+        ${r.reconciles === false ? `<span class="badge danger">doesn't reconcile</span>` : ""}
+        ${r.ready_to_import ? `<span class="badge ok">Ready</span>`
+                            : `<span class="badge progress">In progress</span>`}
+      </div>
+    </div>`).join("")}</div>`;
+  viewEl.querySelectorAll(".invoice-row").forEach(row => {
+    row.addEventListener("click", () => renderRecord(row.dataset.uid, tab));
+  });
+}
+
+async function renderRecord(uid, tab){
+  const data = await api(`/record/${uid}`);
+  const rec = data.record, spec = data.spec;
+  const enums = (spec.validation || {}).enums || {};
+  const fields = (spec.field_spec || {}).fields || [];
+  const prov = rec.provenance || {};
+  const recon = data.reconcile;
+
+  viewEl.innerHTML = `
+    <div class="lines-header" style="margin-bottom:14px;">
+      <button class="ghost" id="gBack">&larr; Back</button>
+      <div style="display:flex; gap:8px; align-items:center;">
+        <label style="font-size:12.5px;">
+          <input type="checkbox" id="gVerify" ${rec.row_status === "verified" ? "checked" : ""}>
+          Verified
+        </label>
+        <button class="danger" id="gDelete" style="border-color:var(--danger); color:var(--danger);">Remove</button>
+      </div>
+    </div>
+    <h3 style="margin:0 0 4px;">${esc(rec.party_name || spec.label)}</h3>
+    <div class="meta" style="margin-bottom:16px;">${esc(spec.label)} &middot; ${
+      Object.entries(rec.natural_key || {}).map(([k,v]) => `${esc(k)}: ${esc(v)}`).join(" &middot; ")}</div>
+    ${recon ? `<div class="recon ${recon.ok ? "ok" : "bad"}">${
+      recon.ok
+        ? `Lines reconcile: ${recon.lines} line(s) total $${money(recon.actual)} against the header.`
+        : `Lines do not reconcile: ${recon.lines} line(s) total $${money(recon.actual)} against a header of $${money(recon.expected)} &mdash; out by $${money(Math.abs(recon.variance))}. Lines marked outside the invoice total are excluded from the sum.`
+    }</div>` : ""}
+    ${prov.notes ? `<div class="provenance"><span class="plabel">Why this was staged this way &mdash; from ${
+      esc(prov.source_workbook || "the weekly review")} (read only)</span>${esc(prov.notes)}</div>` : ""}
+    <div id="gParty"></div>
+    <div class="gfields" id="gFields"></div>
+    <div id="gChildren"></div>`;
+
+  if((spec.field_spec || {}).party_field){
+    await renderPartyPicker(uid, rec);
+  }
+
+  const holder = document.getElementById("gFields");
+  fields.forEach(f => {
+    const wrap = document.createElement("div");
+    wrap.className = "gfield" + (f.required ? " req" : "");
+    const lab = document.createElement("label");
+    lab.textContent = f.label || f.name;
+    wrap.appendChild(lab);
+    wrap.appendChild(fieldInput(f, (rec.payload || {})[f.name],
+      v => saveRecordField(uid, f.name, v), enums));
+    holder.appendChild(wrap);
+  });
+
+  const kidsEl = document.getElementById("gChildren");
+  data.children.forEach(group => {
+    const gf = (group.field_spec || {}).fields || [];
+    const genums = (group.validation || {}).enums || {};
+    const sec = document.createElement("div");
+    sec.innerHTML = `
+      <div class="lines-header">
+        <h3>${esc(group.label)} (${group.rows.filter(r => r.row_status === "verified").length}/${group.rows.length} verified)</h3>
+        <button class="small" data-verifyall="${group.record_type}">Verify all lines</button>
+      </div>
+      <div class="childwrap"><table class="childtable">
+        <thead><tr><th></th>${gf.map(f => `<th>${esc(f.label || f.name)}</th>`).join("")}</tr></thead>
+        <tbody></tbody>
+      </table></div>`;
+    const tbody = sec.querySelector("tbody");
+    group.rows.forEach(row => {
+      const tr = document.createElement("tr");
+      if(row.row_status === "verified") tr.className = "verified";
+      const tick = document.createElement("td");
+      const box = document.createElement("input");
+      box.type = "checkbox"; box.style.width = "auto";
+      box.checked = row.row_status === "verified";
+      box.addEventListener("change", async () => {
+        await api(`/record/${row.record_uid}/verify`,
+          { method:"POST", body: JSON.stringify({ verified: box.checked }) });
+        tr.className = box.checked ? "verified" : "";
+      });
+      tick.appendChild(box); tr.appendChild(tick);
+      gf.forEach(f => {
+        const td = document.createElement("td");
+        td.appendChild(fieldInput(f, (row.payload || {})[f.name],
+          v => saveRecordField(row.record_uid, f.name, v), genums));
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    sec.querySelector("[data-verifyall]").addEventListener("click", async () => {
+      const res = await api(`/record/${uid}/verify-children`,
+        { method:"POST", body: JSON.stringify({ verified: true }) });
+      toast(`Verified ${res.verified} row(s)`);
+      renderRecord(uid, tab);
+    });
+    kidsEl.appendChild(sec);
+  });
+
+  document.getElementById("gBack").addEventListener("click", () => selectTab(tab));
+  document.getElementById("gVerify").addEventListener("change", async (e) => {
+    await api(`/record/${uid}/verify`,
+      { method:"POST", body: JSON.stringify({ verified: e.target.checked }) });
+    toast(e.target.checked ? "Verified" : "Unverified");
+  });
+  document.getElementById("gDelete").addEventListener("click", async () => {
+    await api(`/record/${uid}`, { method:"DELETE" });
+    toast("Removed");
+    selectTab(tab);
+  });
+}
+
+// --------------------------------------------------------------------- nav
+// Tabs come from staging.nav_tab, not from this file. Registering a record
+// type against a tab makes its queue appear here with no front-end change -
+// the same reason the grid is moving onto field_spec.
+
+let NAV = [];
+let currentTab = null;
+
+const SUBTITLES = {
+  invoices_cafe:  "Cafe invoices from the weekly inbox review - pending import to 115kws",
+  invoices_115kw: "115KW building invoices and electricity bills - pending import to 115kws",
+  invoices_117kw: "117KW building invoices - pending import to 115kws",
+  batches:        "Batches ingested into staging, and any that were refused",
+  import_history: "Records promoted into production, most recent first",
+};
+
+function setChrome(tab){
+  const sub = document.querySelector(".topbar .subtitle");
+  if(sub) sub.textContent = SUBTITLES[tab.tab_key] || tab.label;
+  // Import belongs to any queue that has a promotion path, not to cafe alone.
+  document.getElementById("importAllBtn").style.display =
+    tab.kind === "queue" ? "" : "none";
+}
+
+function renderNav(){
+  const el = document.getElementById("mainnav");
+  el.innerHTML = NAV.map(t => {
+    const active = currentTab && t.tab_key === currentTab.tab_key;
+    const count = (t.pending === null || t.pending === undefined)
+      ? "" : `<span class="navcount">${t.pending}</span>`;
+    return `<button class="navtab${active ? " active" : ""}" data-tab="${t.tab_key}">${t.label}${count}</button>`;
+  }).join("");
+  el.querySelectorAll(".navtab").forEach(b => {
+    b.addEventListener("click", () => selectTab(NAV.find(t => t.tab_key === b.dataset.tab)));
+  });
+}
+
+async function selectTab(tab){
+  if(!tab) return;
+  currentTab = tab;
+  renderNav();
+  setChrome(tab);
+  try{
+    if(tab.route === "batches") return await renderBatches();
+    if(tab.route === "import-history") return await renderImports();
+    if(tab.kind === "queue") return await renderQueue(tab);
+    return renderStub(tab);
+  }catch(err){
+    viewEl.innerHTML = `<div class="empty-note">Could not load ${tab.label}: ${err.message}</div>`;
+  }
+}
+
+function renderStub(tab){
+  const why = tab.kind === "queue"
+    ? ((tab.record_types && tab.record_types.length)
+        ? `Nothing pending in ${tab.label}.`
+        : `No record type is registered against ${tab.label} yet, so there is nothing to verify here. Registering one adds its queue automatically.`)
+    : `${tab.label} has not been built yet.`;
+  viewEl.innerHTML = `<div class="empty-note">${why}</div>`;
+}
+
+async function renderBatches(){
+  const rows = await api("/batches");
+  if(!rows.length){
+    viewEl.innerHTML = `<div class="empty-note">No batches ingested yet.</div>`;
+    return;
+  }
+  viewEl.innerHTML = `<div class="invoice-list">${rows.map(b => {
+    const declared = (b.declared_rows === null || b.declared_rows === undefined) ? "?" : b.declared_rows;
+    const short = String(b.reject_reason || "").split("\n").slice(0, 4).join("\n");
+    return `
+    <div class="invoice-row static">
+      <div>
+        <div class="name">${esc(b.record_type)} &mdash; ${b.ingested_rows}/${esc(declared)} records</div>
+        <div class="meta">${esc(b.source_file)}</div>
+        <div class="meta">produced by ${esc(b.produced_by)} &middot; ingested ${toDMY(String(b.ingested_at || "").slice(0,10))} by ${esc(b.ingested_by || "unknown")}</div>
+        ${b.reject_reason ? `<div class="meta reject">${esc(short)}</div>` : ""}
+      </div>
+      <div class="right">
+        ${b.status === "ingested"
+          ? `<span class="badge ok">Ingested</span>`
+          : `<span class="badge danger">Rejected</span>`}
+      </div>
+    </div>`;
+  }).join("")}</div>`;
+}
+
+async function renderImports(){
+  const rows = await api("/imports");
+  if(!rows.length){
+    viewEl.innerHTML = `<div class="empty-note">Nothing has been imported yet.</div>`;
+    return;
+  }
+  viewEl.innerHTML = `<div class="invoice-list">${rows.map(r => `
+    <div class="invoice-row static">
+      <div>
+        <div class="name">${esc(r.party || r.record_type)} ${r.amount ? "&mdash; $" + money(r.amount) : ""}</div>
+        <div class="meta">${esc(r.reference || "")}</div>
+        <div class="meta">${esc(r.record_type)} &middot; imported ${toDMY(String(r.imported_at || "").slice(0,10))}${r.verified_by ? " &middot; verified by " + esc(r.verified_by) : ""}</div>
+      </div>
+    </div>`).join("")}</div>`;
+}
+
+async function loadNav(){
+  try{
+    const { tabs } = await api("/nav");
+    if(tabs && tabs.length){ NAV = tabs; return true; }
+  }catch(err){ /* migration 006 not run yet */ }
+  return false;
+}
+
+async function boot(){
+  const ok = await loadNav();
+  if(!ok){
+    // No nav table yet: behave exactly as the app did before.
+    document.getElementById("mainnav").style.display = "none";
+    return renderHome();
+  }
+  await selectTab(NAV.find(t => t.tab_key === "invoices_cafe") || NAV[0]);
+}
+
+boot();
+
+document.getElementById("refreshBtn").addEventListener("click", async () => {
+  const key = currentTab && currentTab.tab_key;
+  const btn = document.getElementById("refreshBtn");
+  btn.disabled = true;
+  try{
+    const res = await api("/ingest-run", { method:"POST", body: JSON.stringify({}) });
+    const ingest = (res.steps || []).find(s => s.step === "ingest");
+    const line = ingest ? (ingest.output || "").trim().split("\n").pop() : "";
+    if(!res.ok){
+      const bad = (res.steps || []).find(s => s.rc !== 0);
+      toast("Load failed at the " + (bad ? bad.step : "ingest") + " step - see Batches");
+    }else if(line){
+      toast(line);
+    }
+  }catch(err){
+    toast("Could not run the load: " + err.message);
+  }finally{
+    btn.disabled = false;
+  }
+  if(await loadNav()){
+    await selectTab(NAV.find(t => t.tab_key === key) || NAV[0]);
+  }
+});
+</script>
+</body>
+</html>

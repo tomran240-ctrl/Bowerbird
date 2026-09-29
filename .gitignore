@@ -1,0 +1,7 @@
+.env.local
+.env*
+*.bak-*
+__pycache__/
+*.pyc
+.venv/
+_tmp_*

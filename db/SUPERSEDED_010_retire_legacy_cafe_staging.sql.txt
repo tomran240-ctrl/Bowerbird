@@ -1,0 +1,105 @@
+/* ============================================================================
+   Bowerbird Verifier - migration 010 - COMMIT-ONLY
+   Retire the legacy cafe staging tables by making them read-only.
+
+   COMMIT-ONLY. One step, idempotent - a REVOKE already in effect is a no-op.
+   No trailing ROLLBACK. There is no dry-run file: this changes no row, and
+   the assertion at the end proves the outcome better than a rollback would.
+
+   Run:  psql kws115 -f 010_retire_legacy_cafe_staging_commit.sql
+
+   ONLY RUN THIS AFTER THE DRAIN. staging.cafe_invoices must hold no rows in
+   pending or verified: once write access is revoked, the legacy view cannot
+   verify or import anything still sitting there. STEP 0 checks this and stops
+   the script rather than stranding work in a table nobody can write to.
+
+   WHY REVOKE RATHER THAN DROP
+     These two tables hold the link between rows already in cafe.invoices and
+     cafe.purchases and the documents they came from - which invoice PDF, who
+     verified it, when it was imported. Dropping them would destroy that for
+     every invoice imported through the old path. Revoking costs nothing,
+     keeps the history queryable, and is reversible with one GRANT if the
+     cutover has to be undone.
+
+     SELECT is deliberately retained. The rows stay readable to the app and to
+     anyone querying the database.
+
+   This script writes no rule versions, so RULE-SQL pre-flight point 8 has no
+   (rule_id, version) pair to compare.
+   ============================================================================ */
+
+SELECT 'STEP 0 refuse to run while work is still in the legacy queue' AS check;
+
+DO $$
+DECLARE
+    v_open integer;
+BEGIN
+    SELECT count(*) INTO v_open
+    FROM staging.cafe_invoices
+    WHERE row_status IN ('pending', 'verified');
+
+    IF v_open > 0 THEN
+        RAISE EXCEPTION 'STEP 0 FAILED: % cafe invoice(s) are still pending or '
+                        'verified in the legacy queue. Finish importing them '
+                        'before retiring these tables - after this script they '
+                        'cannot be verified or imported. Nothing was changed.',
+                        v_open;
+    END IF;
+
+    RAISE NOTICE 'STEP 0 OK: the legacy cafe queue is drained';
+END
+$$;
+
+SELECT count(*) AS step0_open_legacy_rows
+FROM staging.cafe_invoices WHERE row_status IN ('pending','verified');
+
+SELECT 'STEP 1 revoke write access, keep SELECT' AS check;
+
+BEGIN;
+
+REVOKE INSERT, UPDATE, DELETE ON staging.cafe_invoices FROM verifier_app;
+REVOKE INSERT, UPDATE, DELETE ON staging.cafe_purchases FROM verifier_app;
+
+REVOKE USAGE ON SEQUENCE staging.cafe_invoices_staging_id_seq FROM verifier_app;
+REVOKE USAGE ON SEQUENCE staging.cafe_purchases_staging_id_seq FROM verifier_app;
+
+COMMIT;
+
+SELECT count(*) AS step1_remaining_write_privileges
+FROM information_schema.role_table_grants
+WHERE grantee = 'verifier_app' AND table_schema = 'staging'
+  AND table_name IN ('cafe_invoices','cafe_purchases')
+  AND privilege_type IN ('INSERT','UPDATE','DELETE');
+
+SELECT 'STEP 2 final read-only verification' AS check;
+
+DO $$
+DECLARE
+    v_writes integer;
+    v_invoices integer;
+    v_lines integer;
+BEGIN
+    SELECT count(*) INTO v_writes
+    FROM information_schema.role_table_grants
+    WHERE grantee = 'verifier_app' AND table_schema = 'staging'
+      AND table_name IN ('cafe_invoices','cafe_purchases')
+      AND privilege_type IN ('INSERT','UPDATE','DELETE');
+    IF v_writes <> 0 THEN
+        RAISE EXCEPTION 'STEP 2 FAILED: % write privilege(s) remain', v_writes;
+    END IF;
+
+    IF NOT has_table_privilege('verifier_app', 'staging.cafe_invoices', 'SELECT') THEN
+        RAISE EXCEPTION 'STEP 2 FAILED: SELECT on staging.cafe_invoices was lost';
+    END IF;
+    IF NOT has_table_privilege('verifier_app', 'staging.cafe_purchases', 'SELECT') THEN
+        RAISE EXCEPTION 'STEP 2 FAILED: SELECT on staging.cafe_purchases was lost';
+    END IF;
+
+    SELECT count(*) INTO v_invoices FROM staging.cafe_invoices;
+    SELECT count(*) INTO v_lines FROM staging.cafe_purchases;
+    RAISE NOTICE 'STEP 2 OK: read-only, % invoice row(s) and % line row(s) preserved',
+        v_invoices, v_lines;
+END
+$$;
+
+SELECT 'STEP 3 migration 010 complete' AS check;

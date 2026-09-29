@@ -1,0 +1,252 @@
+/* ============================================================================
+   Bowerbird Verifier - migration 019 - COMMIT-ONLY
+   RULE-STG version 2: what happens when a producer corrects a record.
+
+   COMMIT-ONLY. One writing step, its own transaction, idempotent through a
+   guard on this script's own change_reason. No trailing ROLLBACK.
+
+   Run:  psql kws115 -f 019_rule_stg_v2_commit.sql
+
+   WHAT CHANGED AND WHY
+     v1 said re-offering an unchanged row is a no-op, and left unsaid what
+     happens when the row HAS changed. On 22 Sep 2026 sixteen Square hours
+     records were re-emitted in decimal hours after being staged in minutes.
+     Every one matched an existing record_uid, hit ON CONFLICT DO NOTHING,
+     was counted as a duplicate, and the batch was marked ingested. The
+     corrected figures were discarded and the run reported success.
+
+     v2 adds the AMENDMENT clause: the ingester compares payloads, amends a
+     pending record, and refuses the whole batch when the record has already
+     been verified or imported. staging_ingest.py implements it.
+
+   The body is generated from db/RULE-STG-draft-body.txt, so the file and the
+   registered version cannot drift. checksum is a generated column
+   (md5(body)); this script does not write it.
+
+   RULE-SQL point 8: the version is DERIVED, never a literal.
+   ============================================================================ */
+
+SELECT 'STEP 0 pre-flight' AS check;
+
+DO $preflight$
+DECLARE
+    v_cur integer;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM normalisation.rules WHERE rule_id = 'RULE-STG') THEN
+        RAISE EXCEPTION 'STEP 0 FAILED: RULE-STG is not registered. Run 012 '
+                        'first. Nothing was changed.';
+    END IF;
+    SELECT count(*) INTO v_cur FROM normalisation.rule_versions
+    WHERE rule_id = 'RULE-STG' AND superseded_at IS NULL;
+    IF v_cur <> 1 THEN
+        RAISE EXCEPTION 'STEP 0 FAILED: RULE-STG has % current version(s), '
+                        'expected exactly 1. Nothing was changed.', v_cur;
+    END IF;
+    RAISE NOTICE 'STEP 0 OK: one current version to supersede';
+END
+$preflight$;
+
+SELECT 'STEP 1 supersede v1 and register v2' AS check;
+
+BEGIN;
+
+UPDATE normalisation.rule_versions
+SET superseded_at = CURRENT_DATE
+WHERE rule_id = 'RULE-STG'
+  AND superseded_at IS NULL
+  AND NOT EXISTS (
+      SELECT 1 FROM normalisation.rule_versions
+      WHERE rule_id = 'RULE-STG' AND change_reason = $marker$SCRIPT 2026-09-22b: adds AMENDMENT - record_uid identifies a record, not a version of it, and a corrected payload was being dropped as a duplicate.$marker$
+  );
+
+WITH new_body AS (
+    SELECT $body$
+Every record that enters kws115 through review is carried by a staging
+envelope. This rule is the contract a producer must meet. It binds the
+producer, not the app: the app refuses whatever does not meet it.
+
+WHERE BATCHES GO. One file per record type per run, JSONL, into
+  Finance and Data/Staging Inbox/
+named  <task_id>__<record_type>__<UTC timestamp>.jsonl
+with a sibling <same>.manifest.json. The ingester moves each file to
+Processed/ on success and to Rejected/ with a .error.txt on failure.
+
+NEVER CLEAR OR ARCHIVE THE SOURCE WORKBOOK. It is shared with processes
+this contract does not own. Re-offering rows that were handled weeks ago
+is expected and correct: what prevents double handling is record_uid,
+not an empty file.
+
+THE ENVELOPE. One JSON object per line, these keys, no others:
+
+  schema_version  integer, currently 1
+  record_uid      sha256(record_type + "|" + canonical_json(natural_key))
+  batch_id        <task_id>__<record_type>__<UTC timestamp>
+  record_type     must exist and be active in staging.record_type
+  parent_uid      the parent's record_uid, or null for a root record
+  seq             position within the parent, or null for a root record
+  produced_by     the task_id that wrote it
+  produced_at     ISO 8601 with offset
+  natural_key     object; exactly the fields the registry declares
+  payload         object; exactly the fields the registry declares
+  provenance      object; source_document, source_workbook, party_name,
+                  notes
+
+RECORD_UID IS DERIVED, NEVER ASSIGNED. Canonical JSON means sorted keys
+and no whitespace. Re-running a producer over unchanged input must
+produce identical uids; that identity is the only thing standing between
+a re-offered row and a duplicate. A producer that invents a uid, or
+derives it from anything but the natural key, breaks the guarantee for
+every feed.
+
+THE MANIFEST carries row_count and sha256 of the .jsonl file exactly as
+written. The ingester checks both before interpreting a single line,
+because a truncated transfer otherwise looks exactly like a short batch.
+
+THE REGISTRY IS AUTHORITATIVE. payload keys must match the record type's
+field_spec exactly. A key the registry does not declare is not a bonus,
+it is a rejected batch: register the field first, then produce it. A
+declared field that is absent is null, and null in a required field is
+also a rejected batch.
+
+FIELD SHAPES, and the failures that wrote them:
+
+  Money      amount_ex_gst, gst_amount, amount_inc_gst. Numbers, not
+             strings, no currency symbol, no thousands separator.
+  Dates      ISO YYYY-MM-DD. Not DD/MM/YYYY, which is a display format.
+  Booleans   true or false, never 1/0 or "TRUE". A spreadsheet column
+             holding blanks alongside TRUE arrives as a float, and 1.0
+             compared as text is not "1": an in_invoice_total of TRUE
+             was read as false for exactly that reason, inverting the
+             meaning of the line and putting an invoice out by $6.65.
+  Text       Identifiers that look numeric are STRINGS. An NMI, an
+             account number and an invoice number are text in the
+             destination, and handing over 20022924634 as a number
+             fails at promotion with "operator does not exist: text =
+             bigint", long after anyone is watching.
+  Trim       Leading and trailing whitespace is stripped before the
+             value is emitted. " 271069147" is not "271069147" to a
+             duplicate guard or to a unique index, so an untrimmed cell
+             is how a real duplicate reaches production.
+  Enums      Exactly one of the values the registry lists, case and
+             all. An enum whose value is merely plausible is refused.
+
+ENUMS COME FROM THE DESTINATION. Where the target column carries a
+CHECK constraint, the registry mirrors it, and the producer emits only
+those values. Registering such a column as free text is how a typo
+passes review and fails at write.
+
+PARENTS BEFORE CHILDREN. A child carries its parent's record_uid and
+its own seq, and its natural key includes that seq. Position is part of
+identity because a document may legitimately repeat a line: several
+identical linen items at one price on one invoice are several lines,
+not one, and any key built from content alone silently drops them.
+
+THE TWO NOTES ARE NOT THE SAME NOTE. provenance.notes is the producer's
+reasoning - what the document printed, which rule governed a judgement,
+what a later reconciliation should expect. payload.notes belongs to
+whoever verifies, and a producer never writes it.
+
+A BATCH IS ALL OR NOTHING. There is no partial load. A rejected batch
+is fixed at the producer and re-emitted under a NEW file name: a
+source_file that has already been ingested is never reused, because the
+ingester will not overwrite a batch that landed.
+
+A CORRECTED RECORD IS AN AMENDMENT, NOT A DUPLICATE. record_uid answers
+whether a record has been seen. It does not answer whether the version
+held is the current one, because it is derived from the natural key and
+the natural key carries no figures. A producer re-emitting a record with
+corrected figures is, by uid alone, indistinguishable from one
+re-offering a row that has not changed.
+
+The ingester therefore compares the payload, and:
+
+  identical                     no-op, silently, as before
+  changed, still pending        the staged record is amended, and the run
+                                reports it as an amendment
+  changed, already verified
+  or already imported           the WHOLE batch is refused, naming the
+                                record
+
+The last of those is deliberate. A record a person has already checked is
+not something to revise underneath them. Removing it becomes their act,
+not the producer's.
+
+Provenance is not compared. It is producer metadata and shifts between
+runs without any verified fact changing.
+
+This clause exists because sixteen corrected records were dropped in
+silence on 22 Sep 2026 - re-emitted in decimal hours after being staged
+in minutes, every one matched an existing uid, and the run reported
+success.
+
+NEVER WRITE TO kws115 DIRECTLY. Producers emit files. The app is the
+only writer. See RULE-SQL for the script route where a genuine schema
+or data change is needed.
+
+WHY THIS RULE EXISTS. For three weeks nothing reached the cafe queue,
+because a producer wrote "Inwards" where the app compared against
+"Inward". Both were reasonable; neither was agreed. Nothing errored,
+the file looked healthy, and the only symptom was a queue that stayed
+quiet. A contract that lives in one system's head is not a contract,
+and a mismatch that fails silently is worse than one that fails.
+$body$::text AS body
+)
+INSERT INTO normalisation.rule_versions
+    (rule_id, version, body, change_reason, effective_from)
+SELECT 'RULE-STG',
+       (SELECT coalesce(max(version), 0) + 1
+          FROM normalisation.rule_versions WHERE rule_id = 'RULE-STG'),
+       b.body,
+       $marker$SCRIPT 2026-09-22b: adds AMENDMENT - record_uid identifies a record, not a version of it, and a corrected payload was being dropped as a duplicate.$marker$,
+       CURRENT_DATE
+FROM new_body b
+WHERE NOT EXISTS (
+    SELECT 1 FROM normalisation.rule_versions
+    WHERE rule_id = 'RULE-STG' AND change_reason = $marker$SCRIPT 2026-09-22b: adds AMENDMENT - record_uid identifies a record, not a version of it, and a corrected payload was being dropped as a duplicate.$marker$
+);
+
+COMMIT;
+
+SELECT version, to_char(effective_from,'YYYY-MM-DD') AS effective_from,
+       to_char(superseded_at,'YYYY-MM-DD') AS superseded_at,
+       checksum, length(body) AS body_chars
+FROM normalisation.rule_versions WHERE rule_id = 'RULE-STG' ORDER BY version;
+
+SELECT 'STEP 2 assertions' AS check;
+
+DO $verify$
+DECLARE
+    v_n integer; v_ver integer; v_body text; v_sum text;
+BEGIN
+    SELECT count(*) INTO v_n FROM normalisation.rule_versions
+    WHERE rule_id = 'RULE-STG' AND superseded_at IS NULL;
+    IF v_n <> 1 THEN
+        RAISE EXCEPTION 'ASSERT FAILED: % current version(s), expected 1', v_n;
+    END IF;
+
+    SELECT version, body, checksum INTO v_ver, v_body, v_sum
+    FROM normalisation.rule_versions
+    WHERE rule_id = 'RULE-STG' AND superseded_at IS NULL;
+
+    IF v_ver <> (SELECT max(version) FROM normalisation.rule_versions
+                 WHERE rule_id = 'RULE-STG') THEN
+        RAISE EXCEPTION 'ASSERT FAILED: the current version is not the highest';
+    END IF;
+    IF position('A CORRECTED RECORD IS AN AMENDMENT' in v_body) = 0 THEN
+        RAISE EXCEPTION 'ASSERT FAILED: the new clause is not in the body';
+    END IF;
+    IF position('a mismatch that fails silently is worse than one that fails'
+                in v_body) = 0 THEN
+        RAISE EXCEPTION 'ASSERT FAILED: the closing clause of v1 was lost';
+    END IF;
+    IF v_sum IS DISTINCT FROM md5(v_body) THEN
+        RAISE EXCEPTION 'ASSERT FAILED: checksum is not md5(body)';
+    END IF;
+
+    RAISE NOTICE 'ASSERT OK: RULE-STG v% is current, % characters, checksum %',
+                 v_ver, length(v_body), v_sum;
+    RAISE NOTICE 'Compare with:  md5 -q db/RULE-STG-draft-body.txt';
+END
+$verify$;
+
+SELECT 'STEP 3 migration 019 complete' AS check;

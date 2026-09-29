@@ -528,3 +528,199 @@ FROM staging.batch ORDER BY produced_at DESC LIMIT 20;
 -- registry drift against destination CHECK constraints
 SELECT * FROM staging.v_enum_from_destination WHERE registry_values IS DISTINCT FROM destination_values;
 ```
+
+---
+
+## 12. Decisions and findings of 29 September, later session
+
+This section records what was settled after `HANDOVER-2.md` was written. Read
+that document for the code it describes; this is what the database and the disk
+say about it. Where the two disagree on a fact about production, this is newer.
+
+### 12.1 `gst_assessed` keeps being written to production — already true, no change needed
+
+`promote.py` on the working branch carries **no** `child_exclude` value for
+`cafe_invoice`. The `child_exclude` machinery exists and mirrors the parent
+`exclude`, but no record type uses it, so `gst_assessed` is written as it always
+was. Migration 021's own header says the same in as many words: *"It is still
+written to `cafe.purchases.gst_assessed` on promotion, because that column holds
+the only GST on many lines."*
+
+`HANDOVER-2.md` section 2.4 describes an exclusion that the code does not
+contain — it was written before that decision was reversed and never caught up.
+**Nothing needs changing in `promote.py`.** The figures below are why it must
+stay that way, and are worth keeping even though the danger passed.
+
+`cafe.purchases.gst_assessed` is the column that holds café line GST:
+
+| Cohort | rows | with `gst_declared` | with `gst_assessed` | assessed non-zero and declared null |
+|---|---|---|---|---|
+| historical | 4027 | 387 | 3423 | **1744** |
+| promoted 29 Sep | 30 | 10 | 30 | **14** |
+
+It is nullable, has no default, and `cafe.purchases` has no triggers, so leaving
+it out of the INSERT writes NULL. For 1744 historical rows and 14 of the 30
+promoted on 29 September it is the only GST on the line. Excluding it would not
+retire a column, it would stop recording café GST.
+
+"Drop the GST Assessed field" is satisfied by the registry's `hidden: true`,
+which removes it from the grid and the editors. Keep that; drop the exclusion.
+
+A second reason: the reconcile sum was changed to
+`line_total + coalesce(gst_declared, gst_assessed, 0)`, so the code already
+trusts the figure to check an invoice total against. Trusting it to reconcile and
+refusing to store it cannot both be right.
+
+### 12.2 The supplier-normalisation block ships as built — decided
+
+No verified or imported record is affected. All 18 `cafe_invoice` records are
+`alias`. Among `kw_invoice`: 13 `exact`, 2 `alias`, 1 `fuzzy` (pending), 3 `none`
+(already blocked on a missing `party_id`). `match_type` holds only those four
+values. The rule newly blocks exactly one pending record.
+
+### 12.3 `VERIFIER_PDF_ROOTS` — settled, and no filing fault
+
+Of 18 staged or imported café invoices, 7 have their `provenance.source_document`
+under `Invoice Inwards - Cafe`; the other 11, all dated 21–28 September, are in
+`~/Desktop/INBOX TO FILE` at the top level, unfiled. **All 11 accounted for** —
+the producer is not staging records for documents it has not got, it is staging
+ahead of the filing step, which is the intended order.
+
+`INBOX TO FILE` holds 304 PDFs, so the unfiled backlog is substantial and the
+inbox must stay in the search path permanently, not as a fallback.
+
+```
+VERIFIER_PDF_ROOTS="/Users/admin/Desktop/INBOX TO FILE:\
+/Users/admin/Desktop/Finance and Data/Invoice Inwards - Cafe:\
+/Users/admin/Desktop/Finance and Data/Invoice Inwards - 115KW:\
+/Users/admin/Desktop/Finance and Data/Invoice Inwards - 117KW:\
+/Users/admin/Desktop/Finance and Data/Invoice Inwards - 115KW Electricity:\
+/Users/admin/Desktop/Finance and Data/Invoice Inwards - 117KW Electricity:\
+/Users/admin/Desktop/Finance and Data/Accountant Batch - Cafe - July 2026"
+```
+
+Inbox first, because a freshly staged invoice is the one most likely to be
+opened. `_find_document` uses `rglob`, so month subfolders and the `Duplicates`
+and `Duplicates - Review` folders under each root are covered — which means a
+name present in both a month folder and its `Duplicates` folder resolves to
+whichever the walk reaches first. If that matters, exclude `Duplicates*` in
+`_find_document`.
+
+### 12.4 The bank statement format — three shapes, not one
+
+Written from the actual files, so `shim_bank_debits.py` need not guess. Sources:
+`Bank Statements Cafe/Processed/<YYYY_MM>/` (5 workbooks with matching PDFs),
+plus newer statements sitting in `INBOX TO FILE`.
+
+**Shape A — current CBA export.** Sheets `Bank Transactions` and
+`Account Details`. Row 1 of the first sheet:
+
+```
+Date | Transaction Details | Value Date | Debit | Credit | Balance
+```
+
+`Date` and `Value Date` are `DD/MM/YYYY` strings; `Value Date` is populated for
+card transactions and empty for direct credits. Amounts are numbers. A row
+carries a Debit or a Credit, never both. `Balance` is the running balance after
+the row. Rows ascend by date.
+
+```
+01/09/2026 | VILI S FAMILY BAKERY MILE END SOUT AU | 28/08/2026 | 397.97 |  | 3690.39
+01/09/2026 | Direct Credit <redacted> SQUARE AU PTY LT |      |        | 255.84 | 3844.08
+```
+
+**Shape B — older export, same header.** `Value Date` is empty and the value
+date, the amount and the resulting balance are all embedded in the description:
+
+```
+01/10/2025 | MITOLO COFFEE WELLAND AU Card xx**** Value Date: 30/09/2025 40.21 $ $9,217.30 CR | | 40.21 | | 9217.30
+```
+
+**Shape C — a different export entirely.** One sheet, named with the account
+number. No `Balance` column, different header, leading spaces in two of them,
+`Process date` a real datetime rather than a string, and rows in **descending**
+date order:
+
+```
+Process date | Description | Currency Code | " Debit" | " Credit"
+2026-08-29 00:00:00 | ZAI*OM FleurMilk OM754 Sydney AU Card xx**** Value Date: 27/08/2026 | AUD | 131.50 |
+```
+
+The two `Cafe CBA Acc ... invoices required - <range>.csv` files at the top level
+of `Finance and Data` are Shape C saved as CSV (67 and 81 rows, 45 and 54
+carrying a debit). They are already the "debits awaiting an invoice" subset, which
+is close to what the matching feature wants, but they are a derived extract. The
+workbook is the source.
+
+**What this means for the producer.** It must detect the shape from the header
+rather than assume one: normalise to `{process_date, description, value_date,
+debit, credit, balance_or_none}`, read the value date from the column when
+present and parse `Value Date: DD/MM/YYYY` out of the description when not, and
+treat an embedded amount as a cross-check on the Debit column rather than a
+second source of truth.
+
+**Identity needs care, and `seq` from sheet position will not do it.** Shape C
+has no `Balance`, so balance cannot be part of a universal key; and row position
+is not stable, because the exports overlap — `2026_08_01 to 2026_09_13` and
+`2026_09_01 to 2026_09_13 (trimmed for import)` cover the same days, in
+different shapes, with different row counts. A `seq` taken from the sheet would
+give the same debit two different `record_uid`s and land it twice.
+
+Use instead: `{account_ref, process_date, debit, description, occurrence}`, where
+`occurrence` is the ordinal among rows that are otherwise identical on those four
+fields, assigned after sorting the file deterministically (by process date, then
+amount, then description). Genuinely repeated debits stay distinct, and a
+re-export of the same period computes the same uid for each. `account_ref` should
+be a stable label Tom chooses, not the account number, which should not travel in
+a staging payload.
+
+Still needed before building: which of these files Tom will actually feed it, and
+whether `bank_debit` is promoted to a `cafe` table or staged as match-only — the
+registry needs a `target_schema`/`target_table` either way.
+
+### 12.5 The running app does not have HANDOVER-2's code
+
+`~/Desktop/Finance and Data/Apps/verifier-app/` is a git repo on branch
+`verifier-app-import`, not on `claude/bowerbird-verifier-handover-i7t4ke`.
+Migration 021 is not on that disk. Nothing in `HANDOVER-2.md` section 2 is
+running anywhere, and the `gst_assessed` fix in 12.1 has to be made on the
+working branch, not in the Desktop copy, unless Tom pulls first.
+
+To put the rule bodies where an offline session can read them:
+
+```bash
+psql kws115 -At -c "SELECT body FROM normalisation.v_rules_current WHERE rule_id='RULE-SQL'" > db/RULE-SQL-v8.txt
+```
+
+The same command with any `rule_id` serves the rest; `db/RULE-STG-draft-body.txt`
+is the existing precedent for keeping a rule body in the repo.
+
+### 12.6 Migration 021 checked against RULE-SQL v8 — passes
+
+`db/RULE-SQL-v8.txt` is now in the repo, so the check HANDOVER-2 section 4 asked
+for has been done. All nine pre-flight points, mechanically:
+
+| Point | Result |
+|---|---|
+| 1 column metadata for every relation touched | `cafe.invoices` takes only an `ALTER TABLE ADD COLUMN`, no INSERT, so nullability does not arise. `staging.record_type.field_spec` is `jsonb NOT NULL` with **no default** and is neither generated nor identity — so a `jsonb_set` that returned NULL would abort rather than corrupt. See the note below on `information_schema`. |
+| 2 backslash meta-commands / non-ASCII | 0 and 0 |
+| 3 double-hyphen comments | 0 |
+| 4 pglast, raw vs whitespace-collapsed | 20 statements both ways, no parse error. `AlterTableStmt`, `CommentStmt`, `DoStmt`, `SelectStmt`, `TransactionStmt`, `UpdateStmt` |
+| 5 constraints, indexes, triggers | `cafe.invoices`: PK, two FKs, `UNIQUE (supplier_name, invoice_number)`, a CHECK on `payment_status` the script writes no literal into, no triggers. `staging.record_type`: PK on `record_type`, one FK, no triggers. **No partial unique index anywhere here**, so no mid-transaction ordering trap of the `rule_versions_one_current` kind. Both idempotency guards key on `record_type`, which is the primary key. |
+| 6 execute every read-only statement | All run. `cafe.invoices.defect_log` absent (0 rows, as expected before STEP 1); `cafe_invoice` declares `defect_log` 0 times, so STEP 2 fires; `gst_assessed` hidden 0, declared exactly 1, so STEP 3's guard fires once and the closing assertions will hold after it |
+| 7 DO-block DECLAREs vs aliases | `$preflight$` declares `v_types`, no aliases. `$verify$` declares `v_col`, `v_defect`, `v_hidden`, `v_fields`; aliases `a`, `rt`, `f`. Intersection empty, and every variable carries the `v_` prefix the rule recommends |
+| 8 rule versions | None written; the script says so |
+| 9 defect ID literals | None |
+
+Also confirmed: three `BEGIN`/`COMMIT` pairs, no `ROLLBACK` outside the header
+comment, and the registry shape the script assumes is the real one —
+`field_spec` is an object of `fields`, `natural_key`, `party_field`, with 13
+fields on `cafe_line` and 7 on `cafe_invoice`.
+
+**One divergence worth a decision.** RULE-SQL point 1 mandates
+`information_schema.columns`. Migration 021 uses `pg_catalog.pg_attribute`, and
+so did this check, because `information_schema` is privilege-filtered and has
+already hidden a column from a pre-flight in this project (HANDOVER.md section
+10). The script follows the safer practice and departs from the letter of the
+rule. That is a rule-maintenance question, not a fault in the script: RULE-SQL
+point 1 should probably name `pg_catalog`.

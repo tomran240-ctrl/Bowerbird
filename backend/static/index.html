@@ -740,6 +740,7 @@ async function renderQueue(tab){
           r.child_count ? ` &middot; ${r.child_verified}/${r.child_count} lines verified` : ""}</div>
       </div>
       <div class="right">
+        ${r.party_normalised === false ? `<span class="badge danger">SUPPLIER NOT NORMALISED</span>` : ""}
         ${r.flagged ? `<span class="badge flag">party match</span>` : ""}
         ${r.reconciles === false ? `<span class="badge danger">doesn't reconcile</span>` : ""}
         ${r.ready_to_import ? `<span class="badge ok">Ready</span>`
@@ -799,12 +800,15 @@ async function renderRecord(uid, tab){
           <input type="checkbox" id="gVerify" ${rec.row_status === "verified" ? "checked" : ""}>
           Verified
         </label>
+        ${(rec.provenance || {}).source_document ? `<button class="small" id="gPdf">View PDF</button>` : ""}
+        ${data.importable ? `<button class="small" id="gImport" ${rec.row_status === "verified" ? "" : "disabled title=\"Verify the invoice and its lines first\""}>Import this invoice</button>` : ""}
         <button class="danger" id="gDelete" style="border-color:var(--danger); color:var(--danger);">Remove</button>
       </div>
     </div>
     <h3 style="margin:0 0 4px;">${esc(rec.party_name || spec.label)}</h3>
     <div class="meta" style="margin-bottom:16px;">${esc(spec.label)} &middot; ${
       Object.entries(rec.natural_key || {}).map(([k,v]) => `${esc(k)}: ${esc(v)}`).join(" &middot; ")}</div>
+    ${data.party_normalised === false ? `<div class="recon bad">SUPPLIER NOT NORMALISED: &ldquo;${esc(rec.party_name)}&rdquo; is not confirmed against a known organisation (match: ${esc(rec.match_type || "none")}${rec.candidate_name ? ", closest: " + esc(rec.candidate_name) : ""}). Pick the supplier below; import is blocked until you do.</div>` : ""}
     ${reconBanner(recon, data.reconcile_error)}
     ${xc ? xcBanner(xc) : ""}
     ${prov.notes ? `<div class="provenance"><span class="plabel">Why this was staged this way &mdash; from ${
@@ -818,7 +822,7 @@ async function renderRecord(uid, tab){
   }
 
   const holder = document.getElementById("gFields");
-  fields.forEach(f => {
+  fields.filter(f => !f.hidden).forEach(f => {
     const wrap = document.createElement("div");
     wrap.className = "gfield" + (f.required ? " req" : "");
     const lab = document.createElement("label");
@@ -831,7 +835,7 @@ async function renderRecord(uid, tab){
 
   const kidsEl = document.getElementById("gChildren");
   data.children.forEach(group => {
-    const gf = (group.field_spec || {}).fields || [];
+    const gf = ((group.field_spec || {}).fields || []).filter(f => !f.hidden);
     const genums = (group.validation || {}).enums || {};
     const sec = document.createElement("div");
     sec.innerHTML = `
@@ -882,12 +886,31 @@ async function renderRecord(uid, tab){
     kidsEl.appendChild(sec);
   });
 
+  const pdfBtn = document.getElementById("gPdf");
+  if(pdfBtn) pdfBtn.addEventListener("click", () => {
+    const name = (rec.provenance || {}).source_document;
+    window.open(`${API}/source-document/${encodeURIComponent(name)}`, "bowerbird_pdf_" + name,
+      "width=1000,height=900");
+  });
+  const impBtn = document.getElementById("gImport");
+  if(impBtn) impBtn.addEventListener("click", async () => {
+    try{
+      const dry = await api(`/record/${uid}/import`, { method:"POST", body: JSON.stringify({ dry_run: true }) });
+      if(!dry.ok){ alert("Cannot import yet:\n\n" + dry.output); return; }
+      if(!confirm("Dry run is clean. Import this invoice and its lines into production now?\n\n" + dry.output)) return;
+      const real = await api(`/record/${uid}/import`, { method:"POST", body: JSON.stringify({ dry_run: false }) });
+      if(!real.ok){ alert("Import failed:\n\n" + real.output); return; }
+      toast("Imported");
+      selectTab(tab);
+    }catch(err){ toast(err.message); }
+  });
   document.getElementById("gBack").addEventListener("click", () => selectTab(tab));
   document.getElementById("gVerify").addEventListener("change", async (e) => {
     try{
       await api(`/record/${uid}/verify`,
         { method:"POST", body: JSON.stringify({ verified: e.target.checked }) });
     }catch(err){ e.target.checked = !e.target.checked; toast(err.message); return; }
+    if(impBtn) impBtn.disabled = !e.target.checked;
     toast(e.target.checked ? "Verified" : "Unverified");
   });
   document.getElementById("gDelete").addEventListener("click", async () => {

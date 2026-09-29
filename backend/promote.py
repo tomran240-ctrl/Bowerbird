@@ -147,6 +147,9 @@ PROMOTERS = {
         "child_fk": "invoice_id",
         "child_constants": {"property_code": "115KW", "gst_status": "Auto"},
         "child_extras": cafe_child_extras,
+        # Retired field: the registry still accepts it so an older producer's
+        # batch is not refused, but it is not written to production.
+        "child_exclude": {"gst_assessed"},
     },
     "kw_invoice": {
         "target": ("accounting", "invoices"),
@@ -331,13 +334,14 @@ def spec_for(cur, record_type):
     return dict(row) if row else None
 
 
-def candidates(cur, record_type):
+def candidates(cur, record_type, only_uid=None):
     cur.execute(
         "SELECT record_uid, record_type, natural_key, payload, provenance, party_id, "
-        "party_name, row_status FROM staging.record "
+        "party_name, match_type, row_status FROM staging.record "
         "WHERE record_type = %s AND row_status = 'verified' AND parent_uid IS NULL "
+        "  AND (%s::text IS NULL OR record_uid = %s) "
         "ORDER BY created_at, record_uid",
-        (record_type,),
+        (record_type, only_uid, only_uid),
     )
     return [dict(r) for r in cur.fetchall()]
 
@@ -377,7 +381,7 @@ def insert(cur, schema, table, row):
     return got["id"] if got else None
 
 
-def run(conn, only_type, dry_run, by):
+def run(conn, only_type, dry_run, by, only_uid=None):
     blocks, plan, dropped_report = [], [], {}
     held_report = {}
     seen_keys = {}
@@ -406,7 +410,7 @@ def run(conn, only_type, dry_run, by):
             )
             still_pending[rt] = cur.fetchone()["n"]
 
-            for rec in candidates(cur, rt):
+            for rec in candidates(cur, rt, only_uid):
                 kids = children_of(cur, rec["record_uid"])
                 unverified = [k for k in kids if k["row_status"] != "verified"]
                 if unverified:
@@ -422,6 +426,10 @@ def run(conn, only_type, dry_run, by):
                 if p["needs_party"] and not rec["party_id"]:
                     blocks.append("%s: no confirmed party. Pick one in the app first."
                                   % where)
+                elif p["needs_party"] and rec["match_type"] not in ("alias", "exact"):
+                    blocks.append("%s: supplier '%s' is not normalised (match: %s). "
+                                  "Confirm it in the app first."
+                                  % (where, rec["party_name"], rec["match_type"]))
 
                 cur.execute(p["dup_sql"], p["dup_keys"](rec))
                 if cur.fetchone():
@@ -504,7 +512,7 @@ def run(conn, only_type, dry_run, by):
                     comit = defaulted_not_null(cur, *ct)
                     cpreview = build_row(k["payload"], ccols,
                                          p.get("child_constants", {}), cex,
-                                         (), comit)
+                                         set(p.get("child_exclude", ())), comit)
                     cmissing = sorted(c for c in required_columns(cur, *ct)
                                       if c != child_fk and cpreview.get(c) is None)
                     if cmissing:
@@ -523,6 +531,7 @@ def run(conn, only_type, dry_run, by):
                              "omit_if_none": omit,
                              "child_fk": child_fk,
                              "child_constants": p.get("child_constants", {}),
+                             "child_exclude": set(p.get("child_exclude", ())),
                              "child_extras": p.get("child_extras",
                                                    lambda r, o: {})(rec, org),
                              "child_extras_each": p.get("child_extras_each"),
@@ -589,7 +598,7 @@ def run(conn, only_type, dry_run, by):
                 if p.get("child_extras_each"):
                     cextras.update(p["child_extras_each"](k, rec, p["org"]))
                 crow = build_row(k["payload"], ccols, p["child_constants"],
-                                 cextras, (), comit)
+                                 cextras, p["child_exclude"], comit)
                 crow[p["child_fk"]] = new_id
                 insert(cur, ct[0], ct[1], crow)
                 cur.execute(
@@ -614,12 +623,14 @@ def main():
     ap.add_argument("--db-url", default=os.environ.get("VERIFIER_DB_URL"))
     ap.add_argument("--by", default=os.environ.get("USER", "unknown"))
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--only-uid", default=None,
+                    help="promote just this verified parent record (and its lines)")
     args = ap.parse_args()
     if not args.db_url:
         sys.exit("ERROR: no database. Set VERIFIER_DB_URL or pass --db-url.")
     conn = connect(args.db_url)
     try:
-        code = run(conn, args.only_type, args.dry_run, args.by)
+        code = run(conn, args.only_type, args.dry_run, args.by, args.only_uid)
     except Exception:
         conn.rollback()
         raise

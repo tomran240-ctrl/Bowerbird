@@ -37,6 +37,10 @@ BASE_DIR = Path(__file__).parent
 DB_URL = os.environ.get("VERIFIER_DB_URL", "postgresql://verifier_app:testpass@127.0.0.1:5432/kws115_test")
 # The real inbox - renamed files stay here until a separate filing step moves them.
 PDF_ROOT = Path(os.environ.get("VERIFIER_PDF_ROOT", BASE_DIR / "sample_data" / "pdfs"))
+# Where filed documents live. Colon-separated folders searched, by file name,
+# for a record's provenance.source_document - the RULE-FN filed name.
+PDF_ROOTS = [Path(x) for x in os.environ.get("VERIFIER_PDF_ROOTS", "").split(":") if x] or [PDF_ROOT]
+_DOC_CACHE: dict = {}
 # The two real staging workbooks - set these so the app can check for new
 # rows itself. Left unset, auto-ingest is simply skipped (nothing breaks).
 INVOICE_SUMMARY_PATH = os.environ.get("VERIFIER_INVOICE_SUMMARY_PATH")
@@ -507,6 +511,33 @@ def list_categories():
         return cur.fetchall()
 
 
+def _find_document(name: str):
+    """First PDF called `name` under any of PDF_ROOTS. Base name only - a path
+    from a record is never trusted. Hits are cached; a moved file is re-searched."""
+    if not name or name != os.path.basename(name) or not name.lower().endswith(".pdf"):
+        return None
+    hit = _DOC_CACHE.get(name)
+    if hit and hit.exists():
+        return hit
+    for root in PDF_ROOTS:
+        if not root.is_dir():
+            continue
+        found = next(root.rglob(name), None)
+        if found is not None and found.is_file():
+            _DOC_CACHE[name] = found
+            return found
+    return None
+
+
+@app.get("/api/source-document/{name}")
+def get_source_document(name: str):
+    found = _find_document(name)
+    if found is None:
+        raise HTTPException(404, "PDF '%s' was not found under: %s. Set VERIFIER_PDF_ROOTS "
+                                 "to the folder(s) it is filed in." % (name, ", ".join(map(str, PDF_ROOTS))))
+    return FileResponse(found, media_type="application/pdf")
+
+
 @app.get("/api/documents/{filename:path}")
 def get_document(filename: str):
     candidate = (PDF_ROOT / filename).resolve()
@@ -833,7 +864,7 @@ def _reconcile(cur, record_uid, spec):
     header field to compare it against; the named sums live here so a new
     record type declares one rather than needing new code.
 
-    line_total_inc_gst: sum of line_total + gst_assessed over children that
+    line_total_inc_gst: sum of line_total + GST (gst_declared, else legacy gst_assessed) over children that
     are inside the invoice total. A line marked out-of-total (a card
     surcharge, an adjustment) is excluded, which is the whole reason that
     flag exists.
@@ -849,7 +880,7 @@ def _reconcile(cur, record_uid, spec):
         cur.execute(
             "SELECT coalesce(sum("
             "   (payload->>'line_total')::numeric "
-            "   + coalesce((payload->>'gst_assessed')::numeric, 0)"
+            "   + coalesce((payload->>'gst_declared')::numeric, (payload->>'gst_assessed')::numeric, 0)"
             "), 0) AS total, count(*) AS lines, count(*) AS with_field "
             "FROM staging.record "
             "WHERE parent_uid = %s AND record_type = %s AND row_status <> 'deleted' "
@@ -894,6 +925,15 @@ def _reconcile_verdict(header_value, calc, tolerance=None):
             "variance": float(variance), "ok": abs(variance) <= tol,
             "lines": calc["lines"], "mode": calc["mode"],
             "against": calc["against"], "sum": calc["sum"]}
+
+
+def _party_normalised(spec, match_type, party_id):
+    """None when the type has no party. A party counts as normalised only when
+    it was confirmed (alias) or matched exactly - a fuzzy guess carries a
+    party_id too, and must not pass for one."""
+    if not (spec["field_spec"] or {}).get("party_field"):
+        return None
+    return bool(party_id) and match_type in ("alias", "exact")
 
 
 def _reconcile_for(cur, record_uid, payload, spec):
@@ -1109,6 +1149,43 @@ def promote_tab(body: PromoteBody):
     return {"ok": all(s["rc"] == 0 for s in steps), "steps": steps}
 
 
+class ImportOneBody(BaseModel):
+    dry_run: bool = False
+    by: str = "Tom"
+
+
+@app.post("/api/record/{record_uid}/import")
+def import_record(record_uid: str, body: ImportOneBody):
+    """
+    Promote one verified record and its lines. Runs promote.py --only-uid as a
+    subprocess, for the reason /api/promote does: same code path, same blocks,
+    a non-zero exit with captured output rather than an exception in a request.
+    """
+    import subprocess
+
+    with db() as conn, dictcur(conn) as cur:
+        cur.execute("SELECT record_type, parent_uid, row_status FROM staging.record "
+                    "WHERE record_uid = %s", (record_uid,))
+        row = cur.fetchone()
+    if row is None:
+        raise HTTPException(404, "No such record")
+    if row["parent_uid"]:
+        raise HTTPException(422, "Import the invoice, not one of its lines.")
+    if row["row_status"] != "verified":
+        raise HTTPException(422, detail={"message": "Verify the record (and its lines) first. "
+                                                    "Status is '%s'." % row["row_status"]})
+    cmd = [sys.executable, str(BASE_DIR / "promote.py"), "--type", row["record_type"],
+           "--only-uid", record_uid, "--by", body.by]
+    if body.dry_run:
+        cmd.append("--dry-run")
+    try:
+        done = subprocess.run(cmd, cwd=str(BASE_DIR), capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        raise HTTPException(504, "promote.py timed out after 300s")
+    return {"ok": done.returncode == 0, "dry_run": body.dry_run,
+            "output": (done.stdout or "") + (done.stderr or "")}
+
+
 @app.get("/api/queue/{tab_key}")
 def queue(tab_key: str):
     with db() as conn, dictcur(conn) as cur:
@@ -1159,6 +1236,7 @@ def queue(tab_key: str):
                 "date": payload.get(date_f),
                 "amount": payload.get(amount_f),
                 "flagged": r["flagged"],
+                "party_normalised": _party_normalised(specs[rt], r["match_type"], r["party_id"]),
                 "match_type": r["match_type"],
                 "candidate_name": r["candidate_name"],
                 "row_status": r["row_status"],
@@ -1211,7 +1289,14 @@ def get_record(record_uid: str):
         calc, verdict = _reconcile_for(cur, record_uid, record["payload"] or {}, spec)
         xc = _cross_check(cur, record_uid, record["record_type"], record["payload"] or {}, spec)
 
+        try:
+            from promote import PROMOTERS
+            importable = record["record_type"] in PROMOTERS and record["parent_uid"] is None
+        except Exception:
+            importable = False
         return {"record": record, "spec": spec,
+                "party_normalised": _party_normalised(spec, record["match_type"], record["party_id"]),
+                "importable": importable,
                 "children": [groups[rt] for rt in order],
                 "reconcile": verdict,
                 "reconcile_error": (calc or {}).get("error"), "cross_check": xc}

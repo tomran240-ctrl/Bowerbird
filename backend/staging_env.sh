@@ -11,6 +11,8 @@
 FD="/Users/admin/Desktop/Finance and Data"
 
 export VERIFIER_PDF_ROOT="${VERIFIER_PDF_ROOT:-/Users/admin/Desktop/INBOX TO FILE}"
+# Folders searched (by file name) for a record's source PDF, colon-separated. Add the folder(s) invoices are filed in.
+export VERIFIER_PDF_ROOTS="${VERIFIER_PDF_ROOTS:-$VERIFIER_PDF_ROOT}"
 export VERIFIER_INVOICE_SUMMARY_PATH="${VERIFIER_INVOICE_SUMMARY_PATH:-$FD/Invoice Staging/Invoice Summary - Pending.xlsx}"
 export VERIFIER_LINE_ITEMS_PATH="${VERIFIER_LINE_ITEMS_PATH:-$FD/Invoice Staging/Cafe Line Items - Pending.xlsx}"
 

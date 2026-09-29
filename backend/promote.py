@@ -147,9 +147,6 @@ PROMOTERS = {
         "child_fk": "invoice_id",
         "child_constants": {"property_code": "115KW", "gst_status": "Auto"},
         "child_extras": cafe_child_extras,
-        # Retired field: the registry still accepts it so an older producer's
-        # batch is not refused, but it is not written to production.
-        "child_exclude": {"gst_assessed"},
     },
     "kw_invoice": {
         "target": ("accounting", "invoices"),

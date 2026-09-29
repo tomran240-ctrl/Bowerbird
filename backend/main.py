@@ -522,10 +522,13 @@ def _find_document(name: str):
     for root in PDF_ROOTS:
         if not root.is_dir():
             continue
-        found = next(root.rglob(name), None)
-        if found is not None and found.is_file():
-            _DOC_CACHE[name] = found
-            return found
+        hits = [h for h in root.rglob(name) if h.is_file()]
+        # A name present in a month folder and in its Duplicates folder should
+        # open the filed copy, not the duplicate.
+        hits.sort(key=lambda h: any(part.lower().startswith("duplicates") for part in h.parts))
+        if hits:
+            _DOC_CACHE[name] = hits[0]
+            return hits[0]
     return None
 
 

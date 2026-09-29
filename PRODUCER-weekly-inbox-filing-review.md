@@ -77,8 +77,8 @@ own `natural_key` must contain that same seq.
 `defect_log` (optional free text; usually left for the reviewer)
 
 **cafe_line payload** — `purchase_date`*, `category`*, `item`*, `qty`,
-`unit_cost`, `line_total`*, `gst_applicable`, `gst_declared`, `gst_assessed` (retired: may be omitted, never written to
-production), `expense_type`*, `surcharge_source`, `in_invoice_total`*, `notes`
+`unit_cost`, `line_total`*, `gst_applicable`, `gst_declared`, `gst_assessed` (hidden in the app, still stored: it is the only
+GST on many lines), `expense_type`*, `surcharge_source`, `in_invoice_total`*, `notes`
 
 **kw_invoice payload** — `property_code`*, `invoice_number`*,
 `invoice_date`*, `amount_ex_gst`, `gst_amount`, `amount_inc_gst`*,
